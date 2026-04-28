@@ -367,7 +367,7 @@ async def test_context_builder_must_return_master_context(
         context_builder=lambda: "not-a-context",
     )
 
-    with pytest.raises(TypeError, match="MasterContext"):
+    with pytest.raises(TypeError, match="SpecialistContext"):
         await concierge.send_message(
             user_key=user_key, message_text="x",
             prompt_renderer=prompt_renderer,
@@ -428,6 +428,52 @@ async def test_sync_context_builder_runs_off_event_loop(
     # Sync builder через sync_to_async выполнен в thread-pool, не на main event loop
     assert builder_thread_id is not None
     assert builder_thread_id != main_thread_id
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_with_uuid_id_parser_end_to_end(
+    store, prompt_renderer
+) -> None:
+    """Ayla scenario: AIConcierge с _safe_uuid + SpecialistContext[UUID]."""
+    from uuid import UUID
+
+    from ayla_ai_core import _safe_uuid
+    from ayla_ai_core.context import (
+        SpecialistCandidate,
+        build_specialist_context_from_candidates,
+    )
+
+    uid_anna = UUID("11111111-1111-1111-1111-111111111111")
+    sid_back = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    candidates = [
+        SpecialistCandidate(
+            id=uid_anna, name="Анна", specialization="массаж",
+            services=[(sid_back, "массаж спины")],
+        ),
+    ]
+    uuid_context = build_specialist_context_from_candidates(candidates, tenant_id="ayla")
+
+    # LLM emits UUID-string
+    client = MockOpenAIClient(MockCompletion(
+        tool_call_name="show_masters",
+        tool_call_args={"master_ids": ["11111111-1111-1111-1111-111111111111"], "explanation": "x"},
+    ))
+    concierge = AIConcierge(
+        openai_client=client,
+        store=store,
+        context_builder=lambda: uuid_context,
+        id_parser=_safe_uuid,
+    )
+
+    result = await concierge.send_message(
+        user_key="ayla-user-uuid",
+        message_text="Подбери массажиста",
+        prompt_renderer=prompt_renderer,
+    )
+
+    assert result.action_type == ActionType.SHOW_MASTERS
+    assert len(result.action_data["masters"]) == 1
+    assert result.action_data["masters"][0]["master"]["name"] == "Анна"
 
 
 @pytest.mark.asyncio

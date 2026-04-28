@@ -1,16 +1,24 @@
-"""OpenAI tool definitions для AIConcierge.
+"""OpenAI tool definitions для AIConcierge — generic over ID type (DRF-238).
 
-Адаптация из `mysite/maxbot/ai_tools.py`. Эти JSON-Schema передаются в
-`chat.completions.create(tools=[...])` — LLM эмиттит tool_call, который
-`tool_handlers.dispatch_tool_call` валидирует и формирует action_data.
+Эти JSON-Schema передаются в `chat.completions.create(tools=[...])` — LLM
+эмиттит tool_call, который `tool_handlers.dispatch_tool_call` валидирует и
+формирует action_data.
 
 5 tools в MVP. ActionType — стабильный wire-format между LLM, persisted
 Message.action_type, и UI render layer консумера.
 
-В DRF-238 master_id/service_id (int) станут generic (int для бота, UUID
-для Ayla); сейчас остаются int как в исходном коде Формулы.
+ID type:
+- Bot Формулы (Master.id = int): `build_tool_definitions("integer")` —
+  default, доступно как константа TOOL_DEFINITIONS для backward compat.
+- Ayla (SpecialistProfile.id = UUID): `build_tool_definitions("string")`
+  — UUID передаётся как строка в JSON.
+
+Wire field names — `master_id` / `service_id` остались неизменными после
+DRF-238 (LLM trained behavior + бот в проде уже эмиттит эти имена).
 """
 from __future__ import annotations
+
+from typing import Any, Literal
 
 __all__ = [
     "ASK_CLARIFICATION",
@@ -20,158 +28,201 @@ __all__ = [
     "SHOW_SLOTS",
     "TOOL_DEFINITIONS",
     "ActionType",
+    "build_tool_definitions",
 ]
 
 
-SHOW_MASTERS = {
-    "type": "function",
-    "function": {
-        "name": "show_masters",
-        "description": (
-            "Показать рекомендованных мастеров клиенту с обоснованием выбора. "
-            "Используй после того как клиент выразил пожелание (тип услуги, "
-            "ожидания) и в контексте промпта есть подходящие кандидаты. "
-            "НЕ выдумывай master_id — используй ТОЛЬКО ID из контекста."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "master_ids": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "ID мастеров из контекста, отсортированные по релевантности",
-                    "maxItems": 5,
+# Тип ID в JSON Schema. "integer" для бота (int), "string" для Ayla (UUID).
+IdSchemaType = Literal["integer", "string"]
+
+
+def _show_masters(id_type: IdSchemaType) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "show_masters",
+            "description": (
+                "Показать рекомендованных мастеров клиенту с обоснованием выбора. "
+                "Используй после того как клиент выразил пожелание (тип услуги, "
+                "ожидания) и в контексте промпта есть подходящие кандидаты. "
+                "НЕ выдумывай master_id — используй ТОЛЬКО ID из контекста."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "master_ids": {
+                        "type": "array",
+                        "items": {"type": id_type},
+                        "description": "ID мастеров из контекста, отсортированные по релевантности",
+                        "maxItems": 5,
+                    },
+                    "match_scores": {
+                        "type": "array",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "description": "Оценка совпадения 0-100 для каждого, в том же порядке",
+                    },
+                    "match_reasons": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "description": "Краткие причины (1-3 на мастера) почему подходит",
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": "Общее объяснение почему именно эти мастера выбраны",
+                    },
                 },
-                "match_scores": {
-                    "type": "array",
-                    "items": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "description": "Оценка совпадения 0-100 для каждого, в том же порядке",
+                "required": ["master_ids", "explanation"],
+            },
+        },
+    }
+
+
+def _show_slots(id_type: IdSchemaType) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "show_slots",
+            "description": (
+                "Показать свободные слоты для конкретного мастера + услуги на дату. "
+                "Используй когда клиент выбрал и мастера, и услугу, и день."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "master_id": {"type": id_type, "description": "ID мастера из контекста"},
+                    "service_id": {"type": id_type, "description": "ID услуги из контекста"},
+                    "date": {
+                        "type": "string",
+                        "format": "date",
+                        "description": "Целевая дата YYYY-MM-DD",
+                    },
                 },
-                "match_reasons": {
-                    "type": "array",
-                    "items": {
+                "required": ["master_id", "service_id", "date"],
+            },
+        },
+    }
+
+
+def _confirm_booking(id_type: IdSchemaType) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "confirm_booking",
+            "description": (
+                "Показать карточку подтверждения записи. ВАЖНО: эта функция "
+                "не создаёт запись — клиент подтверждает кликом на кнопку «Да», "
+                "и только тогда запись уйдёт в систему. Эмитти ТОЛЬКО когда "
+                "клиент явно выбрал мастера + услугу + конкретное время."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "master_id": {"type": id_type},
+                    "service_id": {"type": id_type},
+                    "datetime": {
+                        "type": "string",
+                        "format": "date-time",
+                        "description": "Начало слота в ISO 8601 с timezone, e.g. 2026-04-28T14:00:00+03:00",
+                    },
+                },
+                "required": ["master_id", "service_id", "datetime"],
+            },
+        },
+    }
+
+
+def _show_my_bookings() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "show_my_bookings",
+            "description": (
+                "Показать существующие записи клиента. Используй когда спрашивает "
+                "«когда у меня запись», «есть ли у меня бронь», «мои записи»."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "enum": ["upcoming", "past", "all"],
+                        "description": "Какой набор записей показать",
+                    },
+                },
+            },
+        },
+    }
+
+
+def _ask_clarification() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "ask_clarification",
+            "description": (
+                "Задать уточняющий вопрос с предложенными вариантами ответа. "
+                "Используй когда запрос неясен (например «какой день удобнее?»)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "options": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "description": "Опциональные предзаполненные варианты ответа",
+                        "maxItems": 5,
                     },
-                    "description": "Краткие причины (1-3 на мастера) почему подходит",
                 },
-                "explanation": {
-                    "type": "string",
-                    "description": "Общее объяснение почему именно эти мастера выбраны",
-                },
-            },
-            "required": ["master_ids", "explanation"],
-        },
-    },
-}
-
-
-SHOW_SLOTS = {
-    "type": "function",
-    "function": {
-        "name": "show_slots",
-        "description": (
-            "Показать свободные слоты для конкретного мастера + услуги на дату. "
-            "Используй когда клиент выбрал и мастера, и услугу, и день."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "master_id": {"type": "integer", "description": "ID мастера из контекста"},
-                "service_id": {"type": "integer", "description": "ID услуги из контекста"},
-                "date": {
-                    "type": "string",
-                    "format": "date",
-                    "description": "Целевая дата YYYY-MM-DD",
-                },
-            },
-            "required": ["master_id", "service_id", "date"],
-        },
-    },
-}
-
-
-CONFIRM_BOOKING = {
-    "type": "function",
-    "function": {
-        "name": "confirm_booking",
-        "description": (
-            "Показать карточку подтверждения записи. ВАЖНО: эта функция "
-            "не создаёт запись — клиент подтверждает кликом на кнопку «Да», "
-            "и только тогда запись уйдёт в систему. Эмитти ТОЛЬКО когда "
-            "клиент явно выбрал мастера + услугу + конкретное время."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "master_id": {"type": "integer"},
-                "service_id": {"type": "integer"},
-                "datetime": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "Начало слота в ISO 8601 с timezone, e.g. 2026-04-28T14:00:00+03:00",
-                },
-            },
-            "required": ["master_id", "service_id", "datetime"],
-        },
-    },
-}
-
-
-SHOW_MY_BOOKINGS = {
-    "type": "function",
-    "function": {
-        "name": "show_my_bookings",
-        "description": (
-            "Показать существующие записи клиента. Используй когда спрашивает "
-            "«когда у меня запись», «есть ли у меня бронь», «мои записи»."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "filter": {
-                    "type": "string",
-                    "enum": ["upcoming", "past", "all"],
-                    "description": "Какой набор записей показать",
-                },
+                "required": ["question"],
             },
         },
-    },
-}
+    }
 
 
-ASK_CLARIFICATION = {
-    "type": "function",
-    "function": {
-        "name": "ask_clarification",
-        "description": (
-            "Задать уточняющий вопрос с предложенными вариантами ответа. "
-            "Используй когда запрос неясен (например «какой день удобнее?»)."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "question": {"type": "string"},
-                "options": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Опциональные предзаполненные варианты ответа",
-                    "maxItems": 5,
-                },
-            },
-            "required": ["question"],
-        },
-    },
-}
+def build_tool_definitions(id_schema_type: IdSchemaType = "integer") -> list[dict[str, Any]]:
+    """Factory: 5 tool definitions с указанным JSON Schema id type.
+
+    - "integer" — default, для int IDs (бот Формулы, Master.id).
+    - "string" — для UUID consumers (Ayla, SpecialistProfile.id передаётся
+      как str(uuid)).
+
+    Возвращает свежий list каждый вызов (mutable dicts — caller может
+    модифицировать без эффекта на других consumers).
+    """
+    return [
+        _show_masters(id_schema_type),
+        _show_slots(id_schema_type),
+        _confirm_booking(id_schema_type),
+        _show_my_bookings(),
+        _ask_clarification(),
+    ]
 
 
-TOOL_DEFINITIONS = [
-    SHOW_MASTERS,
-    SHOW_SLOTS,
-    CONFIRM_BOOKING,
-    SHOW_MY_BOOKINGS,
-    ASK_CLARIFICATION,
-]
+# ─── Backward compat constants (default int IDs для бота) ─────────────────
+
+# Default tool definitions — int IDs. Бот / legacy callers могут импортировать
+# напрямую `from ayla_ai_core import TOOL_DEFINITIONS`. Ayla / multi-tenant
+# консумеры используют `build_tool_definitions("string")`.
+TOOL_DEFINITIONS = build_tool_definitions("integer")
+
+SHOW_MASTERS = TOOL_DEFINITIONS[0]
+"""DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
+
+SHOW_SLOTS = TOOL_DEFINITIONS[1]
+"""DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
+
+CONFIRM_BOOKING = TOOL_DEFINITIONS[2]
+"""DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
+
+SHOW_MY_BOOKINGS = TOOL_DEFINITIONS[3]
+"""DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
+
+ASK_CLARIFICATION = TOOL_DEFINITIONS[4]
+"""DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
 
 class ActionType:
