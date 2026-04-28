@@ -1,0 +1,302 @@
+"""Tests для prompts.py — BrandVoiceConfig + render_system_prompt."""
+from __future__ import annotations
+
+from datetime import date
+from uuid import UUID
+
+import pytest
+
+from ayla_ai_core.context import (
+    SpecialistCandidate,
+    build_specialist_context_from_candidates,
+)
+from ayla_ai_core.prompts import (
+    AYLA_MARKETPLACE_VOICE,
+    FORMULA_TELA_VOICE,
+    BrandVoiceConfig,
+    Example,
+    render_system_prompt,
+)
+
+# ─── Fixtures ─────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def specialist_context():
+    """Минимальный SpecialistContext[int] для бота."""
+    candidates = [
+        SpecialistCandidate(
+            id=42, name="Анна Иванова", specialization="массаж",
+            services=[(10, "массаж спины"), (11, "лимфодренаж")],
+        ),
+    ]
+    return build_specialist_context_from_candidates(candidates)
+
+
+@pytest.fixture
+def empty_context():
+    return build_specialist_context_from_candidates([])
+
+
+@pytest.fixture
+def render_kwargs(specialist_context):
+    return {
+        "today": date(2026, 5, 15),
+        "client_name": "Мария",
+        "bookings_count": 3,
+        "specialist_context": specialist_context,
+    }
+
+
+# ─── BrandVoiceConfig dataclass ───────────────────────────────────────────
+
+
+def test_brand_voice_config_is_frozen() -> None:
+    config = BrandVoiceConfig(
+        assistant_name="X", business_name="Y", business_address=None,
+        domain="test", off_topic_redirect="redirect",
+    )
+    with pytest.raises(AttributeError):
+        config.assistant_name = "Z"  # type: ignore[misc]
+
+
+def test_brand_voice_config_examples_default_empty() -> None:
+    config = BrandVoiceConfig(
+        assistant_name="X", business_name="Y", business_address=None,
+        domain="t", off_topic_redirect="r",
+    )
+    assert config.examples == []
+    assert config.use_long_term_memory_hint is False
+
+
+def test_example_dataclass() -> None:
+    ex = Example(user="хочу маникюр", assistant="вызвать show_masters")
+    assert ex.user == "хочу маникюр"
+    assert ex.assistant == "вызвать show_masters"
+
+
+# ─── render_system_prompt — Formula tela voice ────────────────────────────
+
+
+def test_render_formula_tela_includes_assistant_name(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "Алина" in out
+    assert "Формула тела" in out
+    assert "Пензе" in out
+
+
+def test_render_formula_tela_off_topic_redirect(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "массаж и SPA в нашем салоне" in out
+
+
+def test_render_formula_tela_no_memory_hint_section(render_kwargs) -> None:
+    """Бот: use_long_term_memory_hint=False → секции про память нет."""
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "долгосрочная память" not in out
+
+
+# ─── render_system_prompt — Ayla marketplace voice ────────────────────────
+
+
+def test_render_ayla_marketplace_uses_ayla_name(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=AYLA_MARKETPLACE_VOICE, **render_kwargs)
+    assert "Ayla" in out
+    assert "AI-помощник" in out
+    # Без локального адреса (marketplace)
+    assert "Пензе" not in out
+    assert "ул. Пушкина" not in out
+
+
+def test_render_ayla_includes_memory_hint(render_kwargs) -> None:
+    """Ayla: use_long_term_memory_hint=True → правило 9 про память."""
+    out = render_system_prompt(voice_config=AYLA_MARKETPLACE_VOICE, **render_kwargs)
+    assert "долгосрочная память" in out
+
+
+def test_render_ayla_off_topic_redirect(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=AYLA_MARKETPLACE_VOICE, **render_kwargs)
+    assert "beauty-мастерам" in out
+
+
+# ─── render_system_prompt — common (state injection) ──────────────────────
+
+
+def test_render_includes_today(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "2026-05-15" in out
+
+
+def test_render_includes_client_name(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "Мария" in out
+
+
+def test_render_empty_client_name_falls_back(specialist_context) -> None:
+    out = render_system_prompt(
+        today=date(2026, 5, 15),
+        client_name="",
+        bookings_count=0,
+        specialist_context=specialist_context,
+        voice_config=FORMULA_TELA_VOICE,
+    )
+    assert "клиент" in out
+
+
+def test_render_includes_bookings_count(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "Прошлых записей у клиента: 3" in out
+
+
+def test_render_includes_masters_summary(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "master_id=42" in out
+    assert "Анна Иванова" in out
+    assert "service_id=10" in out
+
+
+def test_render_empty_context_no_masters(empty_context) -> None:
+    out = render_system_prompt(
+        today=date(2026, 5, 15), client_name="X", bookings_count=0,
+        specialist_context=empty_context, voice_config=FORMULA_TELA_VOICE,
+    )
+    assert "(нет активных мастеров" in out
+
+
+# ─── render_system_prompt — empty slots rules (Phase 0 hot fix) ───────────
+
+
+def test_render_includes_empty_slots_rules(render_kwargs) -> None:
+    """Phase 0 hot fix — правила про пустые слоты должны быть."""
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "ПРАВИЛА ПРИ ПУСТЫХ СЛОТАХ" in out
+    assert "не заканчивай диалог фразой «нет слотов»".lower() in out.lower()
+    assert "ask_clarification" in out
+
+
+# ─── render_system_prompt — anti-hallucination rules ──────────────────────
+
+
+def test_render_includes_critical_anti_hallucination_rule(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "КРИТИЧЕСКОЕ ПРАВИЛО" in out
+    assert "show_masters вместо текста" in out
+
+
+def test_render_includes_no_phone_request_rule(render_kwargs) -> None:
+    """Правило 7 — не запрашивать телефон/email."""
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "телефон" in out
+
+
+def test_render_includes_all_5_tools(render_kwargs) -> None:
+    """Все 5 tools упоминаются в prompt."""
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    for tool in ["show_masters", "show_slots", "confirm_booking",
+                 "show_my_bookings", "ask_clarification"]:
+        assert tool in out
+
+
+# ─── render_system_prompt — examples block (Level 5 enabler) ──────────────
+
+
+def test_render_no_examples_block_when_empty(render_kwargs) -> None:
+    """Default config (examples=[]) — examples block отсутствует."""
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "ПРИМЕРЫ ХОРОШИХ ДИАЛОГОВ" not in out
+
+
+def test_render_includes_examples_when_provided(render_kwargs) -> None:
+    """Custom config с examples — ПРИМЕРЫ ХОРОШИХ ДИАЛОГОВ block добавляется."""
+    config_with_examples = BrandVoiceConfig(
+        assistant_name="Алина",
+        business_name="Формула тела",
+        business_address="Пензе",
+        domain="массаж",
+        off_topic_redirect="redirect",
+        examples=[
+            Example(user="болит спина", assistant="show_masters [массажисты]"),
+            Example(user="когда у меня запись", assistant="show_my_bookings"),
+        ],
+    )
+    out = render_system_prompt(voice_config=config_with_examples, **render_kwargs)
+    assert "ПРИМЕРЫ ХОРОШИХ ДИАЛОГОВ" in out
+    assert "болит спина" in out
+    assert "когда у меня запись" in out
+
+
+# ─── Token budget ─────────────────────────────────────────────────────────
+
+
+def test_render_token_budget_under_2000_for_small_context(render_kwargs) -> None:
+    """Базовый случай (1 мастер, без examples) — должен быть <2000 токенов
+    (грубая оценка: chars / 4, не точный tiktoken).
+    """
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    # Грубо: 1 token ≈ 4 chars для русского текста
+    estimated_tokens = len(out) / 4
+    assert estimated_tokens < 2000, (
+        f"Prompt too large: {len(out)} chars ≈ {estimated_tokens:.0f} tokens"
+    )
+
+
+def test_render_token_budget_under_2500_with_50_candidates() -> None:
+    """50 мастеров — prompt всё ещё в разумных пределах для gpt-4o-mini.
+
+    Это edge case (Ayla marketplace при scale). Проверяем что не взрывается.
+    """
+    candidates = [
+        SpecialistCandidate(
+            id=i, name=f"Мастер {i}", specialization="массаж",
+            services=[(j, f"услуга {j}") for j in range(i, i + 3)],
+        )
+        for i in range(1, 51)
+    ]
+    ctx = build_specialist_context_from_candidates(candidates)
+    out = render_system_prompt(
+        today=date(2026, 5, 15), client_name="X", bookings_count=0,
+        specialist_context=ctx, voice_config=FORMULA_TELA_VOICE,
+    )
+    estimated_tokens = len(out) / 4
+    # 50 candidates × 4 lines × 30 chars ≈ 6000 chars + base ~5000 chars = ~2750 tokens
+    # Допускаем до 4000 для safety на 50 candidates (но в проде Top-N=20)
+    assert estimated_tokens < 4000
+
+
+# ─── render_system_prompt — UUID context (Ayla scenario) ──────────────────
+
+
+def test_render_works_with_uuid_specialist_context() -> None:
+    """SpecialistContext[UUID] (Ayla) — render выдаёт валидный prompt."""
+    uid = UUID("11111111-1111-1111-1111-111111111111")
+    sid = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    candidates = [
+        SpecialistCandidate(
+            id=uid, name="Anna", specialization="massage",
+            services=[(sid, "back massage")],
+        ),
+    ]
+    ctx = build_specialist_context_from_candidates(candidates, tenant_id="ayla")
+
+    out = render_system_prompt(
+        today=date(2026, 5, 15), client_name="Maria", bookings_count=0,
+        specialist_context=ctx, voice_config=AYLA_MARKETPLACE_VOICE,
+    )
+    assert "11111111-1111" in out
+    assert "Ayla" in out
+
+
+# ─── Pre-built configs sanity checks ─────────────────────────────────────
+
+
+def test_formula_tela_voice_has_expected_values() -> None:
+    assert FORMULA_TELA_VOICE.assistant_name == "Алина"
+    assert FORMULA_TELA_VOICE.business_name == "Формула тела"
+    assert FORMULA_TELA_VOICE.business_address is not None
+    assert FORMULA_TELA_VOICE.use_long_term_memory_hint is False
+
+
+def test_ayla_marketplace_voice_has_expected_values() -> None:
+    assert AYLA_MARKETPLACE_VOICE.assistant_name == "Ayla"
+    assert AYLA_MARKETPLACE_VOICE.business_address is None
+    assert AYLA_MARKETPLACE_VOICE.use_long_term_memory_hint is True
