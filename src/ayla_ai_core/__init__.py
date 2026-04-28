@@ -5,11 +5,17 @@ Public API (semver-stable):
 - ChatResponseDTO — return type для send_message
 - ConversationStore — Protocol для persistence backend (структурный typing)
 - MessageRole — wire-format для Message.role
-- MasterContext / MasterCandidate — Top-N кандидаты с anti-hallucination IDs
-- TOOL_DEFINITIONS / ActionType — 5 OpenAI tools (show_masters, show_slots,
+- SpecialistContext / SpecialistCandidate — Generic[ID_T] (int | UUID)
+  Top-N кандидаты с anti-hallucination IDs + multi-tenant scope (DRF-238)
+- TOOL_DEFINITIONS — default int IDs (бот). Для UUID:
+  `build_tool_definitions("string")` (DRF-238)
+- ActionType — 5 wire-format constants (show_masters, show_slots,
   confirm_booking, show_my_bookings, ask_clarification)
 - dispatch_tool_call — главный seam для tool_call routing с anti-hallucination
 - ToolResult — return type для dispatch_tool_call
+- _safe_int / _safe_uuid — id parsers (DRF-238)
+- MasterContext / MasterCandidate — DEPRECATED aliases на SpecialistContext[int].
+  Бот использует до DRF-243 миграции; после удалить.
 
 Internal helpers (handle_*) НЕ экспортируются — caller'ы используют
 dispatch_tool_call. Прямой импорт остаётся возможным
@@ -17,21 +23,25 @@ dispatch_tool_call. Прямой импорт остаётся возможны�
 contract для тестов и редкой интеграции, не часть semver-promise.
 
 Извлечено из `mysite/maxbot/` (production-tested 30+ days в Формуле тела) в DRF-237.
-См. `docs/BOT_CODE_AUDIT_2026-04.md` (в djangoproject) для extraction plan
-и `docs/PRODUCT_AUDIT_2026-04.md` для strategic context.
+DRF-238 — generic over ID type + multi-tenant.
+См. `docs/BOT_CODE_AUDIT_2026-04.md` (в djangoproject) для extraction plan.
 
 Roadmap:
-- 0.3.0 (DRF-238): generic ID-type (int → UUID) — breaking change на TOOL_DEFINITIONS
-  и MasterCandidate. Pre-1.0 минорные релизы могут быть breaking.
-- 0.4.0 (DRF-239): BrandVoiceConfig + tenant-aware render_system_prompt.
+- 0.4.0 (DRF-238, this release): SpecialistContext[ID_T] + tenant_id + id_parser.
+  Pre-1.0 — minor releases могут быть breaking.
+- 0.5.0 (DRF-239): BrandVoiceConfig + tenant-aware render_system_prompt.
 - 1.0.0: API стабилизирован, бот мигрирован (DRF-243), Ayla M4-pilot live.
 """
 from __future__ import annotations
 
 from ayla_ai_core.context import (
+    ID_T,
     MasterCandidate,
     MasterContext,
+    SpecialistCandidate,
+    SpecialistContext,
     build_master_context_from_candidates,
+    build_specialist_context_from_candidates,
     render_summary_text,
 )
 from ayla_ai_core.orchestrator import (
@@ -46,6 +56,8 @@ from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
     ToolResult,
+    _safe_int,
+    _safe_uuid,
     dispatch_tool_call,
 )
 from ayla_ai_core.tools import (
@@ -56,15 +68,18 @@ from ayla_ai_core.tools import (
     SHOW_SLOTS,
     TOOL_DEFINITIONS,
     ActionType,
+    build_tool_definitions,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
+    # Tool definitions (factory + default int constants)
     "ASK_CLARIFICATION",
     "CONFIRM_BOOKING",
     "DEFAULT_HISTORY_LIMIT",
     "DEFAULT_MODEL_NAME",
+    "ID_T",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
@@ -73,14 +88,22 @@ __all__ = [
     "ActionType",
     "ChatResponseDTO",
     "ConversationStore",
+    # Backward compat (deprecated, для бота до DRF-243)
     "MasterCandidate",
     "MasterContext",
     "MasterResolver",
     "MessageRole",
     "ServiceResolver",
+    # Generic context (preferred)
+    "SpecialistCandidate",
+    "SpecialistContext",
     "ToolResult",
     "__version__",
+    "_safe_int",
+    "_safe_uuid",
     "build_master_context_from_candidates",
+    "build_specialist_context_from_candidates",
+    "build_tool_definitions",
     "dispatch_tool_call",
     "render_summary_text",
 ]

@@ -1,57 +1,87 @@
-"""Master context — Top-N кандидатов мастеров с реальными ID для anti-hallucination.
+"""SpecialistContext — Top-N кандидатов с реальными ID для anti-hallucination.
 
-Адаптация из `mysite/maxbot/ai_context.py`. Pure-Python dataclasses без Django:
-концепция и render-логика общая, фактический build (ORM-запрос) остаётся в
-консумере (бот / Ayla backend) и инжектится в `AIConcierge` через
-`context_builder` callable.
+Извлечено в DRF-237 как `MasterContext` (int IDs only). DRF-238 расширил до
+generic `SpecialistContext[ID_T]` — int для бота Формулы (Master), UUID для
+Ayla (SpecialistProfile). Multi-tenant scoping через optional `tenant_id`.
 
-В DRF-238 будет добавлен generic ID-type (int → UUID) и multi-tenant scoping;
-сейчас только базовая dataclass с int ID (как в боте Формулы).
+Pure-Python dataclasses без Django: концепция и render-логика общая, фактический
+build (ORM-запрос) остаётся в консумере (бот / Ayla backend) и инжектится в
+`AIConcierge` через `context_builder` callable.
+
+Backward compat:
+- `MasterContext` / `MasterCandidate` остаются как aliases на
+  `SpecialistContext[int]` / `SpecialistCandidate[int]` — бот не сломается до
+  DRF-243 миграции.
+- `build_master_context_from_candidates` — alias на specialist-версию.
+
+Wire format (JSON Schema field names в tools.py):
+- `master_id` / `service_id` остаются неизменными — это было в боте 30+ дней,
+  LLM trained behavior зависит. Только семантика типа меняется (int → str для UUID).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeVar
+from uuid import UUID
 
 __all__ = [
+    # Generic (preferred)
+    "ID_T",
+    # Backward compat aliases (bot-side, deprecated)
     "MasterCandidate",
     "MasterContext",
+    "SpecialistCandidate",
+    "SpecialistContext",
+    "build_master_context_from_candidates",
+    "build_specialist_context_from_candidates",
     "render_summary_text",
 ]
 
 
+# ID-type generic. Bot Формулы использует int (Django Master.id), Ayla — UUID
+# (SpecialistProfile.id). Также допустимо str (для UUID-as-string wire format).
+ID_T = TypeVar("ID_T", int, UUID, str)
+
+
 @dataclass(frozen=True)
-class MasterCandidate:
-    """Один мастер для контекста LLM.
+class SpecialistCandidate[ID_T: (int, UUID, str)]:
+    """Один specialist для контекста LLM.
 
     services — список (service_id, name) для cross-validation в handle_show_slots
-    (handler проверяет что выбранная услуга действительно принадлежит мастеру).
+    и handle_confirm_booking (handler проверяет что выбранная услуга действительно
+    принадлежит specialist'у — anti-hallucination layer 2).
     """
 
-    id: int
+    id: ID_T
     name: str
     specialization: str
-    services: list[tuple[int, str]]
+    services: list[tuple[ID_T, str]]
 
 
 @dataclass(frozen=True)
-class MasterContext:
+class SpecialistContext[ID_T: (int, UUID, str)]:
     """Bundle кандидатов + frozenset ID для O(1) anti-hallucination check.
 
     candidate_ids и candidate_service_ids — frozenset для быстрой проверки
-    `master_id in context.candidate_ids` в каждом tool_handler. Без них LLM
-    галлюцинации (придуманный master_id) пропускались бы дальше.
+    `master_id in context.candidate_ids` в каждом tool_handler.
 
     summary_text — markdown-рендер для system_prompt с явными
     `master_id=N` / `service_id=N` (LLM использует эти ID в tool_call args).
+    Wire format остаётся `master_id` для backward compat.
+
+    tenant_id — multi-tenant scope (DRF-238). Optional для single-tenant случаев
+    (бот Формулы тела). Ayla marketplace передаёт tenant_id для каждого
+    запроса — handlers и render могут использовать для branding или filtering.
     """
 
-    candidates: list[MasterCandidate]
-    candidate_ids: frozenset[int]
-    candidate_service_ids: frozenset[int]
+    candidates: list[SpecialistCandidate[ID_T]]
+    candidate_ids: frozenset[ID_T]
+    candidate_service_ids: frozenset[ID_T]
     summary_text: str
+    tenant_id: str | None = None
 
 
-def render_summary_text(candidates: list[MasterCandidate]) -> str:
+def render_summary_text[ID_T: (int, UUID, str)](candidates: list[SpecialistCandidate[ID_T]]) -> str:
     """Компактный markdown-список с явными ID для system_prompt.
 
     Формат:
@@ -60,9 +90,14 @@ def render_summary_text(candidates: list[MasterCandidate]) -> str:
             * service_id=11 лимфодренаж
             * +ещё 11
 
-    Trade-off: ~50 токенов/мастера vs anti-hallucination win. Real-world
-    incident 2026-04-27: gpt-4o-mini выдал service_id=1 (не существующий),
-    handler сфолбекнулся на ask_clarification — клиент не увидел поломку.
+    Trade-off: ~50 токенов/specialist vs anti-hallucination win. Real-world
+    incident 2026-04-27 (бот Формулы): gpt-4o-mini выдал service_id=1 (не
+    существующий), handler сфолбекнулся на ask_clarification — клиент молча
+    получил уточняющий вопрос, не error.
+
+    Wire format: для UUID-консумеров (Ayla) c.id будет `UUID('abc-123-...')`,
+    str(c.id) даёт "abc-123-...". Для int (бот) — "42". В обоих случаях
+    LLM получает строку и эмиттит её в tool_call.
     """
     if not candidates:
         return "(нет активных мастеров — записаться можно только через менеджера)"
@@ -79,18 +114,47 @@ def render_summary_text(candidates: list[MasterCandidate]) -> str:
     return "\n".join(lines)
 
 
-def build_master_context_from_candidates(candidates: list[MasterCandidate]) -> MasterContext:
-    """Helper для consumer-side ORM builders: возьми candidates, получи MasterContext.
+def build_specialist_context_from_candidates[ID_T: (int, UUID, str)](
+    candidates: list[SpecialistCandidate[ID_T]],
+    *,
+    tenant_id: str | None = None,
+) -> SpecialistContext[ID_T]:
+    """Helper для consumer-side ORM builders: возьми candidates, получи SpecialistContext.
 
-    Bot/Ayla строят `list[MasterCandidate]` через свой ORM, потом передают сюда —
-    получают frozenset'ы и summary бесплатно.
+    Бот / Ayla строят `list[SpecialistCandidate[ID_T]]` через свой ORM, потом
+    передают сюда — получают frozenset'ы и summary бесплатно.
+
+    tenant_id — optional для multi-tenant (DRF-238). По умолчанию None
+    (single-tenant случай бота).
     """
-    all_service_ids: set[int] = set()
+    all_service_ids: set[ID_T] = set()
     for c in candidates:
         all_service_ids.update(sid for sid, _ in c.services)
-    return MasterContext(
+    return SpecialistContext(
         candidates=candidates,
         candidate_ids=frozenset(c.id for c in candidates),
         candidate_service_ids=frozenset(all_service_ids),
         summary_text=render_summary_text(candidates),
+        tenant_id=tenant_id,
     )
+
+
+# ─── Backward compat aliases (DRF-237 → DRF-238) ──────────────────────────
+# Bot Формулы использует MasterCandidate / MasterContext до DRF-243 миграции.
+# После DRF-243 эти aliases можно удалить.
+
+MasterCandidate = SpecialistCandidate[int]
+"""DEPRECATED: используй SpecialistCandidate[int]. Alias для backward compat с ботом."""
+
+MasterContext = SpecialistContext[int]
+"""DEPRECATED: используй SpecialistContext[int]. Alias для backward compat с ботом."""
+
+
+def build_master_context_from_candidates(
+    candidates: list[SpecialistCandidate[int]],
+) -> SpecialistContext[int]:
+    """DEPRECATED: используй build_specialist_context_from_candidates.
+
+    Backward compat для бота — без tenant_id (single-tenant Формула тела).
+    """
+    return build_specialist_context_from_candidates(candidates)

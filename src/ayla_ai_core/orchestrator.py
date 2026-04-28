@@ -49,10 +49,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from asgiref.sync import sync_to_async
 
-from ayla_ai_core.context import MasterContext
+from ayla_ai_core.context import SpecialistContext
 from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
+    _safe_int,
     dispatch_tool_call,
 )
 from ayla_ai_core.tools import TOOL_DEFINITIONS
@@ -173,10 +174,11 @@ def _compose_messages(
 
 def _parse_completion(
     completion: Any,
-    master_context: MasterContext,
+    specialist_context: SpecialistContext[Any],
     *,
     master_resolver: MasterResolver | None,
     service_resolver: ServiceResolver | None,
+    id_parser: Callable[[Any], Any],
 ) -> tuple[str, dict | None, str | None, dict | None]:
     """Returns (content, tool_call_raw, action_type, action_data)."""
     msg = completion.choices[0].message
@@ -190,9 +192,10 @@ def _parse_completion(
     # либо один tool-call, не цепочка)
     tc = tool_calls[0]
     result = dispatch_tool_call(
-        tc, master_context,
+        tc, specialist_context,
         master_resolver=master_resolver,
         service_resolver=service_resolver,
+        id_parser=id_parser,
     )
 
     raw = {
@@ -234,18 +237,23 @@ class AIConcierge:
         model_name: str = DEFAULT_MODEL_NAME,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         tool_definitions: list[dict] | None = None,
+        id_parser: Callable[[Any], Any] = _safe_int,
     ) -> None:
         """Construct AIConcierge.
 
         openai_client: AsyncOpenAI — async OpenAI client (или совместимый).
         store: реализация ConversationStore (sync методы; будут обёрнуты в
             sync_to_async автоматически).
-        context_builder: callable() → MasterContext (sync OR async). Должен
+        context_builder: callable() → SpecialistContext (sync OR async). Должен
             быть дёшевым — вызывается на каждый turn.
         model_name: OpenAI model id. Default gpt-4o-mini (production-tested
             в боте Формулы).
         history_limit: max messages из истории для LLM context. Default 10.
-        tool_definitions: override TOOL_DEFINITIONS. Default — все 5 standard.
+        tool_definitions: override TOOL_DEFINITIONS. Default — int IDs.
+            Для UUID consumers — `build_tool_definitions("string")`.
+        id_parser: функция парсинга master_id/service_id из LLM args.
+            Default `_safe_int` (бот). Для UUID-консумеров (Ayla) передавать
+            `_safe_uuid`. См. tool_handlers.py.
         """
         self._openai_client = openai_client
         self._store = store
@@ -253,6 +261,7 @@ class AIConcierge:
         self._model_name = model_name
         self._history_limit = history_limit
         self._tool_definitions = tool_definitions or TOOL_DEFINITIONS
+        self._id_parser = id_parser
 
         # async-обёртки для sync ORM-методов store
         self._resolve_conv = sync_to_async(store.resolve_active_conversation)
@@ -264,7 +273,7 @@ class AIConcierge:
         *,
         user_key: Any,
         message_text: str,
-        prompt_renderer: Callable[[MasterContext], str],
+        prompt_renderer: Callable[[SpecialistContext[Any]], str],
         master_resolver: MasterResolver | None = None,
         service_resolver: ServiceResolver | None = None,
     ) -> ChatResponseDTO:
@@ -273,7 +282,7 @@ class AIConcierge:
         user_key: key для store.resolve_active_conversation (обычно BotUser/User
             instance, ID — зависит от store impl).
         message_text: текст от пользователя.
-        prompt_renderer: callable(master_context) → system_prompt string.
+        prompt_renderer: callable(specialist_context) → system_prompt string.
             Caller инжектит свои template + state (today, client_name,
             bookings_count). DRF-239 заменит на BrandVoiceConfig-based
             renderer.
@@ -301,13 +310,13 @@ class AIConcierge:
         # SynchronousOnlyOperation. Async builder вызываем напрямую +
         # _maybe_await на результат (для совместимости с обоими стилями).
         if inspect.iscoroutinefunction(self._context_builder):
-            master_context_raw = await self._context_builder()
+            specialist_context_raw = await self._context_builder()
         else:
-            master_context_raw = await sync_to_async(self._context_builder)()
-        master_context = await _maybe_await(master_context_raw)
-        if not isinstance(master_context, MasterContext):
+            specialist_context_raw = await sync_to_async(self._context_builder)()
+        specialist_context = await _maybe_await(specialist_context_raw)
+        if not isinstance(specialist_context, SpecialistContext):
             raise TypeError(
-                f"context_builder must return MasterContext, got {type(master_context)}"
+                f"context_builder must return SpecialistContext, got {type(specialist_context)}"
             )
 
         # 4. Load recent history
@@ -318,7 +327,7 @@ class AIConcierge:
         )
 
         # 5. Render system prompt
-        system_prompt = prompt_renderer(master_context)
+        system_prompt = prompt_renderer(specialist_context)
 
         # 6. Compose for OpenAI
         llm_messages = _compose_messages(
@@ -338,9 +347,10 @@ class AIConcierge:
 
         # 8. Parse: content + opt action
         content, tool_call_raw, action_type, action_data = _parse_completion(
-            completion, master_context,
+            completion, specialist_context,
             master_resolver=master_resolver,
             service_resolver=service_resolver,
+            id_parser=self._id_parser,
         )
 
         # 9. Telemetry

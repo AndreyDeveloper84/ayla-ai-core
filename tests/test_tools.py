@@ -88,3 +88,50 @@ def test_dispatch_tool_call_is_public_seam() -> None:
     """dispatch_tool_call — единственный public seam для tool routing."""
     import ayla_ai_core
     assert "dispatch_tool_call" in ayla_ai_core.__all__
+
+
+# ─── DRF-238: build_tool_definitions factory ──────────────────────────────
+
+
+def test_build_tool_definitions_default_is_integer() -> None:
+    """Default — integer IDs (бот, backward compat)."""
+    from ayla_ai_core.tools import build_tool_definitions
+
+    defs = build_tool_definitions()
+    show_masters = next(d for d in defs if d["function"]["name"] == "show_masters")
+    items_type = show_masters["function"]["parameters"]["properties"]["master_ids"]["items"]["type"]
+    assert items_type == "integer"
+
+
+def test_build_tool_definitions_string_for_uuid() -> None:
+    """`"string"` — для UUID-консумеров (Ayla)."""
+    from ayla_ai_core.tools import build_tool_definitions
+
+    defs = build_tool_definitions("string")
+    show_masters = next(d for d in defs if d["function"]["name"] == "show_masters")
+    items_type = show_masters["function"]["parameters"]["properties"]["master_ids"]["items"]["type"]
+    assert items_type == "string"
+    # Все ID-fields в schema должны быть string
+    show_slots = next(d for d in defs if d["function"]["name"] == "show_slots")
+    assert show_slots["function"]["parameters"]["properties"]["master_id"]["type"] == "string"
+    assert show_slots["function"]["parameters"]["properties"]["service_id"]["type"] == "string"
+
+
+def test_build_tool_definitions_returns_fresh_list() -> None:
+    """Каждый вызов — fresh list, mutation одного caller'а не аффектит другого."""
+    from ayla_ai_core.tools import build_tool_definitions
+
+    a = build_tool_definitions()
+    b = build_tool_definitions()
+    assert a is not b
+    # Mutation не cross-contaminate
+    a[0]["function"]["name"] = "MUTATED"
+    assert b[0]["function"]["name"] == "show_masters"
+
+
+def test_default_tool_definitions_constant_is_integer() -> None:
+    """Module-level TOOL_DEFINITIONS — backward compat constant."""
+    from ayla_ai_core import TOOL_DEFINITIONS
+
+    show_masters = next(d for d in TOOL_DEFINITIONS if d["function"]["name"] == "show_masters")
+    assert show_masters["function"]["parameters"]["properties"]["master_ids"]["items"]["type"] == "integer"

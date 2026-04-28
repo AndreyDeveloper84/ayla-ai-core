@@ -1,8 +1,10 @@
 """Tool-call handlers — валидация LLM args + формирование action_data.
 
-Адаптация из `mysite/maxbot/ai_tool_handlers.py`. Handlers SIDE-EFFECT-FREE:
-- Не делают network calls (real fetch слотов / создание записей — в render layer
-  и action_service консумера)
+DRF-237 — извлечение из бота. DRF-238 — generic over ID type через injected
+`id_parser` callable.
+
+Handlers SIDE-EFFECT-FREE:
+- Не делают network calls
 - Не пишут в БД (persistence — caller-side)
 - Только validate args + формируют action_data для UI рендера
 
@@ -15,6 +17,15 @@ ID — `_fallback_clarification` возвращает ask_clarification вмес
 Real-world incident 2026-04-27 (бот Формулы тела): gpt-4o-mini выдал
 service_id=1 которого не было в БД, handler сфолбекнулся на ask_clarification —
 клиент молча получил уточняющий вопрос, не error.
+
+ID parsing (DRF-238):
+- Default `_safe_int` для int IDs (бот, backward compat).
+- `_safe_uuid` для UUID IDs (Ayla).
+- Custom parser передаётся через `dispatch_tool_call(..., id_parser=...)`.
+
+Cross-validation в handle_show_slots / handle_confirm_booking — master.services
+должен содержать service_id (LLM trust boundary layer 2 — даже если оба ID
+валидны globally, проверяется что мастер реально оказывает услугу).
 
 Для `handle_confirm_booking` — нужны имена мастера/услуги для UI карточки.
 В боте они подтягиваются ORM-запросом. В shared package принимаем optional
@@ -29,14 +40,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
+from uuid import UUID
 
-from ayla_ai_core.context import MasterContext
+from ayla_ai_core.context import SpecialistContext
 from ayla_ai_core.tools import ActionType
 
 __all__ = [
     "MasterResolver",
     "ServiceResolver",
     "ToolResult",
+    "_safe_int",
+    "_safe_uuid",
     "dispatch_tool_call",
     "handle_ask_clarification",
     "handle_confirm_booking",
@@ -52,8 +66,8 @@ logger = logging.getLogger("ayla_ai_core.tool_handlers")
 # Optional resolvers для confirm_booking enrichment.
 # Возвращают dict с полями name (str), price_from (Decimal | str | None),
 # duration_min (int | None) — ИЛИ None если объект не найден.
-MasterResolver = Callable[[int], dict[str, Any] | None]
-ServiceResolver = Callable[[int], dict[str, Any] | None]
+MasterResolver = Callable[[Any], dict[str, Any] | None]
+ServiceResolver = Callable[[Any], dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -68,7 +82,7 @@ class ToolResult:
     action_data: dict[str, Any]
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────
+# ─── ID parsers ───────────────────────────────────────────────────────────
 
 
 def _safe_int(value: Any) -> int | None:
@@ -84,6 +98,27 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (ValueError, TypeError):
         return None
+
+
+def _safe_uuid(value: Any) -> UUID | None:
+    """Defensive UUID cast. None / "" / non-UUID-string / non-string → None.
+
+    Используется как `id_parser` для Ayla (SpecialistProfile.id). LLM эмиттит
+    UUID как строку в JSON; UUID()-конструктор поднимает ValueError на не-UUID.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return UUID(value)
+    except (ValueError, AttributeError):
+        return None
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────
 
 
 def _fallback_clarification(reason: str, *, question: str = "") -> ToolResult:
@@ -105,18 +140,26 @@ def _fallback_clarification(reason: str, *, question: str = "") -> ToolResult:
 # ─── handle_show_masters ──────────────────────────────────────────────────
 
 
-def handle_show_masters(args: dict[str, Any], context: MasterContext) -> ToolResult:
+def handle_show_masters(
+    args: dict[str, Any],
+    context: SpecialistContext[Any],
+    *,
+    id_parser: Callable[[Any], Any] = _safe_int,
+) -> ToolResult:
     """Validate master_ids в context.candidate_ids, drop invalid silently.
 
     Anti-hallucination: LLM выдумал ID — фильтруем. Если все невалидные →
     fallback. Partial result (часть валидных) лучше чем dead chat turn.
+
+    id_parser: int для бота (default), UUID для Ayla, custom callable для
+    других консумеров.
     """
     raw_ids = args.get("master_ids") or []
     scores = args.get("match_scores") or []
     reasons = args.get("match_reasons") or []
     explanation = args.get("explanation") or ""
 
-    valid_ids_normalized = [_safe_int(rid) for rid in raw_ids]
+    valid_ids_normalized = [id_parser(rid) for rid in raw_ids]
     valid_ids = [
         vid for vid in valid_ids_normalized
         if vid is not None and vid in context.candidate_ids
@@ -149,15 +192,20 @@ def handle_show_masters(args: dict[str, Any], context: MasterContext) -> ToolRes
 # ─── handle_show_slots ────────────────────────────────────────────────────
 
 
-def handle_show_slots(args: dict[str, Any], context: MasterContext) -> ToolResult:
+def handle_show_slots(
+    args: dict[str, Any],
+    context: SpecialistContext[Any],
+    *,
+    id_parser: Callable[[Any], Any] = _safe_int,
+) -> ToolResult:
     """Validate (master_id, service_id) в context + ISO date.
 
     Реальный fetch слотов (YClients API / Ayla appointments) — в render
     layer консумера. Handler делает только валидацию args + проверку что
     мастер действительно оказывает выбранную услугу.
     """
-    master_id = _safe_int(args.get("master_id"))
-    service_id = _safe_int(args.get("service_id"))
+    master_id = id_parser(args.get("master_id"))
+    service_id = id_parser(args.get("service_id"))
     date_str = args.get("date") or ""
 
     if master_id is None or master_id not in context.candidate_ids:
@@ -195,10 +243,11 @@ def handle_show_slots(args: dict[str, Any], context: MasterContext) -> ToolResul
 
 def handle_confirm_booking(
     args: dict[str, Any],
-    context: MasterContext,
+    context: SpecialistContext[Any],
     *,
     master_resolver: MasterResolver | None = None,
     service_resolver: ServiceResolver | None = None,
+    id_parser: Callable[[Any], Any] = _safe_int,
 ) -> ToolResult:
     """Validate (master_id, service_id) + ISO datetime.
 
@@ -210,8 +259,8 @@ def handle_confirm_booking(
     (для рендера confirmation card). Если не предоставлены — поля None,
     caller дополняет в render layer.
     """
-    master_id = _safe_int(args.get("master_id"))
-    service_id = _safe_int(args.get("service_id"))
+    master_id = id_parser(args.get("master_id"))
+    service_id = id_parser(args.get("service_id"))
     datetime_str = args.get("datetime") or ""
 
     if master_id is None or master_id not in context.candidate_ids:
@@ -315,10 +364,11 @@ def handle_ask_clarification(args: dict[str, Any]) -> ToolResult:
 
 def dispatch_tool_call(
     tool_call: Any,
-    context: MasterContext,
+    context: SpecialistContext[Any],
     *,
     master_resolver: MasterResolver | None = None,
     service_resolver: ServiceResolver | None = None,
+    id_parser: Callable[[Any], Any] = _safe_int,
 ) -> ToolResult:
     """Главный диспетчер. Принимает OpenAI tool_call object, возвращает ToolResult.
 
@@ -327,6 +377,10 @@ def dispatch_tool_call(
 
     tool_call — OpenAI's tool_call с .function.name и .function.arguments
     (JSON-string). Duck-typed (Any) чтобы не зависеть от SDK-версии.
+
+    id_parser — функция для парсинга master_id/service_id из LLM args.
+    Default `_safe_int` (бот). Для UUID-консумеров (Ayla) пере давать
+    `_safe_uuid`.
     """
     name = getattr(tool_call.function, "name", "") or ""
     raw_args = getattr(tool_call.function, "arguments", "") or "{}"
@@ -337,14 +391,15 @@ def dispatch_tool_call(
         return _fallback_clarification(f"invalid_json_arguments_in_{name}")
 
     if name == ActionType.SHOW_MASTERS:
-        return handle_show_masters(args, context)
+        return handle_show_masters(args, context, id_parser=id_parser)
     if name == ActionType.SHOW_SLOTS:
-        return handle_show_slots(args, context)
+        return handle_show_slots(args, context, id_parser=id_parser)
     if name == ActionType.CONFIRM_BOOKING:
         return handle_confirm_booking(
             args, context,
             master_resolver=master_resolver,
             service_resolver=service_resolver,
+            id_parser=id_parser,
         )
     if name == ActionType.SHOW_MY_BOOKINGS:
         return handle_show_my_bookings(args)

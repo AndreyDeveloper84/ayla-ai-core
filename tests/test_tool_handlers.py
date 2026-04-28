@@ -402,3 +402,124 @@ def test_tool_result_is_frozen() -> None:
     r = ToolResult(action_type="x", action_data={})
     with pytest.raises(AttributeError):
         r.action_type = "y"  # type: ignore[misc]
+
+
+# ─── DRF-238: id_parser support (UUID consumers) ──────────────────────────
+
+
+class TestUuidIdParser:
+    """Ayla-style consumer: SpecialistContext[UUID] + _safe_uuid id_parser."""
+
+    @pytest.fixture
+    def uuid_context(self):
+        from uuid import UUID
+
+        from ayla_ai_core.context import (
+            SpecialistCandidate,
+            build_specialist_context_from_candidates,
+        )
+
+        uid_anna = UUID("11111111-1111-1111-1111-111111111111")
+        uid_boris = UUID("22222222-2222-2222-2222-222222222222")
+        sid_back = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        sid_spa = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+        candidates = [
+            SpecialistCandidate(
+                id=uid_anna, name="Анна", specialization="массаж",
+                services=[(sid_back, "массаж спины")],
+            ),
+            SpecialistCandidate(
+                id=uid_boris, name="Борис", specialization="спа",
+                services=[(sid_spa, "СПА")],
+            ),
+        ]
+        return build_specialist_context_from_candidates(candidates, tenant_id="ayla")
+
+    def test_safe_uuid_parses_uuid_string(self) -> None:
+        from uuid import UUID
+
+        from ayla_ai_core.tool_handlers import _safe_uuid
+
+        assert _safe_uuid("11111111-1111-1111-1111-111111111111") == UUID(
+            "11111111-1111-1111-1111-111111111111"
+        )
+
+    def test_safe_uuid_returns_none_for_non_uuid(self) -> None:
+        from ayla_ai_core.tool_handlers import _safe_uuid
+
+        assert _safe_uuid("not-a-uuid") is None
+        assert _safe_uuid("") is None
+        assert _safe_uuid(None) is None
+        assert _safe_uuid(42) is None
+        assert _safe_uuid([]) is None
+
+    def test_safe_uuid_passes_through_uuid_objects(self) -> None:
+        from uuid import UUID, uuid4
+
+        from ayla_ai_core.tool_handlers import _safe_uuid
+
+        u = uuid4()
+        assert _safe_uuid(u) is u
+        # And str-form too
+        assert _safe_uuid(str(u)) == u
+        assert isinstance(_safe_uuid(str(u)), UUID)
+
+    def test_show_masters_with_uuid_parser(self, uuid_context) -> None:
+        """LLM эмиттит UUID-strings → handler парсит через _safe_uuid → matches context."""
+        from ayla_ai_core.tool_handlers import _safe_uuid, handle_show_masters
+
+        args = {
+            "master_ids": ["11111111-1111-1111-1111-111111111111"],
+            "explanation": "x",
+        }
+        result = handle_show_masters(args, uuid_context, id_parser=_safe_uuid)
+        assert result.action_type == ActionType.SHOW_MASTERS
+        assert len(result.action_data["masters"]) == 1
+        assert result.action_data["masters"][0]["master"]["name"] == "Анна"
+
+    def test_show_masters_hallucinated_uuid_fallback(self, uuid_context) -> None:
+        """LLM выдумал валидный по форме но not-in-DB UUID → fallback."""
+        from ayla_ai_core.tool_handlers import _safe_uuid, handle_show_masters
+
+        args = {
+            "master_ids": ["99999999-9999-9999-9999-999999999999"],
+            "explanation": "x",
+        }
+        result = handle_show_masters(args, uuid_context, id_parser=_safe_uuid)
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+
+    def test_dispatch_with_uuid_parser_routes_correctly(self, uuid_context) -> None:
+        """dispatch_tool_call с id_parser=_safe_uuid → правильно парсит и роутит."""
+        from ayla_ai_core.tool_handlers import _safe_uuid
+
+        tc = _make_tool_call(
+            "show_slots",
+            '{"master_id": "11111111-1111-1111-1111-111111111111", '
+            '"service_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", '
+            '"date": "2026-05-15"}',
+        )
+        result = dispatch_tool_call(tc, uuid_context, id_parser=_safe_uuid)
+        assert result.action_type == ActionType.SHOW_SLOTS
+        # Проверяем что master.services cross-validation проходит для UUID
+        assert "service_id" in result.action_data
+
+    def test_default_int_parser_rejects_uuid_string(self, master_context) -> None:
+        """Default _safe_int отбрасывает UUID-string как invalid → fallback.
+
+        Sanity check: бот (default int) не должен случайно match UUID-формат.
+        """
+        args = {
+            "master_ids": ["11111111-1111-1111-1111-111111111111"],
+            "explanation": "x",
+        }
+        # Без id_parser override — default _safe_int → не парсит UUID → fallback
+        result = handle_show_masters(args, master_context)
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+
+
+def test_handlers_id_parser_default_is_safe_int(master_context) -> None:
+    """Backward compat: handlers без id_parser=... используют _safe_int (бот)."""
+    args = {"master_ids": [1, 2], "explanation": "x"}
+    result = handle_show_masters(args, master_context)
+    assert result.action_type == ActionType.SHOW_MASTERS
+    assert len(result.action_data["masters"]) == 2
