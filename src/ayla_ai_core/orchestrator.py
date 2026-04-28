@@ -1,8 +1,8 @@
 """AIConcierge — главный chat-pipeline orchestrator.
 
-Адаптация из `mysite/maxbot/ai_concierge.py` (а тот, в свою очередь, был портом
-из `Ayla/djangoproject/ai/application/services/chat_service.py`). Извлечение
-выполнено в DRF-237.
+Извлечено в DRF-237 из `mysite/maxbot/ai_concierge.py` (production-tested
+30+ days). См. `docs/BOT_CODE_AUDIT_2026-04.md` Section 1.3 (architectural
+pattern) и Section 4 (Variant C+ shared package strategy).
 
 Pipeline на каждый user-message:
 1. store.resolve_active_conversation(user_key) → existing OR new
@@ -296,7 +296,14 @@ class AIConcierge:
         )
 
         # 3. Build context
-        master_context_raw = self._context_builder()
+        # Sync builder (типичный case бота: Django ORM query) — оборачиваем в
+        # sync_to_async чтобы ORM не блокировал event loop / не ронял
+        # SynchronousOnlyOperation. Async builder вызываем напрямую +
+        # _maybe_await на результат (для совместимости с обоими стилями).
+        if inspect.iscoroutinefunction(self._context_builder):
+            master_context_raw = await self._context_builder()
+        else:
+            master_context_raw = await sync_to_async(self._context_builder)()
         master_context = await _maybe_await(master_context_raw)
         if not isinstance(master_context, MasterContext):
             raise TypeError(

@@ -110,6 +110,13 @@ class TestShowMasters:
         assert result.action_type == ActionType.SHOW_MASTERS
         assert len(result.action_data["masters"]) == 1
 
+    def test_bool_master_id_rejected(self, master_context) -> None:
+        """LLM выдал JSON `true` (= 1 в int cast) — не должен совпасть с master_id=1."""
+        args = {"master_ids": [True, False], "explanation": "x"}
+        result = handle_show_masters(args, master_context)
+        # True → _safe_int returns None → отфильтрован → все невалидны → fallback
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+
 
 # ─── handle_show_slots ────────────────────────────────────────────────────
 
@@ -207,6 +214,79 @@ class TestConfirmBooking:
         args = {"master_id": 1, "service_id": 10, "datetime": "next-week"}
         result = handle_confirm_booking(args, master_context)
         assert result.action_type == ActionType.ASK_CLARIFICATION
+
+    def test_master_does_not_offer_service_fallback(self, master_context) -> None:
+        """LLM trust boundary: (Анна id=1, СПА id=12 от Бориса) → master.services check сработает.
+
+        Без cross-validation booking endpoint принимает любую (master, service) пару из
+        global candidate_service_ids, что приводит к подтверждению bookings которые мастер
+        не делает. Это самый safety-critical handler.
+        """
+        args = {
+            "master_id": 1,  # Анна
+            "service_id": 12,  # СПА Бориса (есть в context.candidate_service_ids, но не у Анны)
+            "datetime": "2026-05-15T14:00:00+03:00",
+        }
+        result = handle_confirm_booking(args, master_context)
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+        assert "не оказывает" in result.action_data["question"]
+
+    def test_decimal_price_from_coerced_to_str(self, master_context) -> None:
+        """Decimal не JSON-serializable — handler должен defensively cast в str.
+
+        action_data попадёт в Message.action_data (JSONField) — Decimal сломает serialization.
+        Соответствует behavior бота: `str(service.price_from) if service.price_from else None`.
+        """
+        from decimal import Decimal
+
+        master_resolver = lambda mid: {"name": "Анна"} if mid == 1 else None
+        service_resolver = lambda sid: {
+            "name": "массаж", "price_from": Decimal("2500.00"), "duration_min": 60,
+        } if sid == 10 else None
+
+        args = {
+            "master_id": 1, "service_id": 10,
+            "datetime": "2026-05-15T14:00:00+03:00",
+        }
+        result = handle_confirm_booking(
+            args, master_context,
+            master_resolver=master_resolver,
+            service_resolver=service_resolver,
+        )
+        assert result.action_type == ActionType.CONFIRM_BOOKING
+        # Critical: type должен быть str, не Decimal — иначе JSONField сломается
+        assert isinstance(result.action_data["price_from"], str)
+        assert result.action_data["price_from"] == "2500.00"
+
+    def test_price_from_none_stays_none(self, master_context) -> None:
+        """None должен остаться None (не "None" строкой)."""
+        master_resolver = lambda mid: {"name": "Анна"}
+        service_resolver = lambda sid: {
+            "name": "массаж", "price_from": None, "duration_min": 60,
+        }
+        args = {
+            "master_id": 1, "service_id": 10,
+            "datetime": "2026-05-15T14:00:00+03:00",
+        }
+        result = handle_confirm_booking(
+            args, master_context,
+            master_resolver=master_resolver,
+            service_resolver=service_resolver,
+        )
+        assert result.action_data["price_from"] is None
+
+    def test_master_unavailable_specific_question(self, master_context) -> None:
+        """Resolver-None должен дать конкретный user-facing question, не generic."""
+        args = {
+            "master_id": 1, "service_id": 10,
+            "datetime": "2026-05-15T14:00:00+03:00",
+        }
+        result = handle_confirm_booking(
+            args, master_context,
+            master_resolver=lambda mid: None,
+        )
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+        assert "недоступен" in result.action_data["question"]
 
 
 # ─── handle_show_my_bookings ──────────────────────────────────────────────

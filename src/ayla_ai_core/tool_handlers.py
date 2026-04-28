@@ -72,8 +72,13 @@ class ToolResult:
 
 
 def _safe_int(value: Any) -> int | None:
-    """Defensive int cast. None / "" / "abc" / [] → None."""
-    if value is None or value == "":
+    """Defensive int cast. None / "" / "abc" / [] / bool → None.
+
+    bool — guarded explicitly: int(True) == 1 silently matches candidate_id=1
+    if LLM ever emits a JSON boolean. Floats are truncated (int(1.7) == 1) —
+    treated as LLM intent error elsewhere via candidate_id check.
+    """
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
         return int(value)
@@ -213,6 +218,20 @@ def handle_confirm_booking(
         return _fallback_clarification("confirm_booking_invalid_master_id")
     if service_id is None or service_id not in context.candidate_service_ids:
         return _fallback_clarification("confirm_booking_invalid_service_id")
+
+    # Cross-validation: master.services должен содержать service (mirror handle_show_slots).
+    # Без этого LLM trust boundary leak: (master_id=Анна, service_id=Бориса) проходит,
+    # потому что service_id в global candidate_service_ids — но мастер его не оказывает.
+    master = next((c for c in context.candidates if c.id == master_id), None)
+    if master is None:
+        return _fallback_clarification("confirm_booking_master_lost")
+    master_service_ids = {sid for sid, _ in master.services}
+    if service_id not in master_service_ids:
+        return _fallback_clarification(
+            "confirm_booking_master_does_not_offer_service",
+            question="Этот мастер не оказывает данную услугу. Подобрать другого?",
+        )
+
     try:
         slot = datetime.fromisoformat(datetime_str)
     except (ValueError, TypeError):
@@ -228,19 +247,32 @@ def handle_confirm_booking(
         "duration_min": None,
     }
 
-    # Optional enrichment через resolvers
+    # Optional enrichment через resolvers. resolver-None semantics:
+    # «мастер/услуга деактивированы между recommendation и confirmation» (race)
+    # — отдельный fallback с конкретным user-facing question + отдельным reason
+    # tag для ops-наблюдаемости.
     if master_resolver is not None:
         master_data = master_resolver(master_id)
         if master_data is None:
-            return _fallback_clarification("confirm_booking_master_orm_failed")
+            return _fallback_clarification(
+                "confirm_booking_master_unavailable",
+                question="Этот мастер больше недоступен. Подобрать другого?",
+            )
         action_data["master_name"] = master_data.get("name")
 
     if service_resolver is not None:
         service_data = service_resolver(service_id)
         if service_data is None:
-            return _fallback_clarification("confirm_booking_service_orm_failed")
+            return _fallback_clarification(
+                "confirm_booking_service_unavailable",
+                question="Эта услуга временно недоступна. Подобрать другую?",
+            )
         action_data["service_name"] = service_data.get("name")
-        action_data["price_from"] = service_data.get("price_from")
+        # price_from coercion: Decimal не JSON-serializable, а action_data уйдёт
+        # в Message.action_data (JSONField). Stringify defensively — соответствует
+        # behavior бота `str(service.price_from) if service.price_from else None`.
+        price = service_data.get("price_from")
+        action_data["price_from"] = str(price) if price is not None else None
         action_data["duration_min"] = service_data.get("duration_min")
 
     return ToolResult(

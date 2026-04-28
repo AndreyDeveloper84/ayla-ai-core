@@ -396,6 +396,66 @@ async def test_async_context_builder_supported(
 
 
 @pytest.mark.asyncio
+async def test_sync_context_builder_runs_off_event_loop(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """Sync builder (типичный case бота — Django ORM) — должен быть обёрнут
+    в sync_to_async, иначе блокирующий I/O сидит на event loop'е и Django
+    кидает SynchronousOnlyOperation.
+
+    Test strategy: builder засекает thread_id; main event loop — другой thread.
+    """
+    import threading
+
+    main_thread_id = threading.get_ident()
+    builder_thread_id = None
+
+    def sync_builder():
+        nonlocal builder_thread_id
+        builder_thread_id = threading.get_ident()
+        return master_context
+
+    client = MockOpenAIClient(MockCompletion(content="ок"))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=sync_builder,
+    )
+    await concierge.send_message(
+        user_key=user_key, message_text="x",
+        prompt_renderer=prompt_renderer,
+    )
+
+    # Sync builder через sync_to_async выполнен в thread-pool, не на main event loop
+    assert builder_thread_id is not None
+    assert builder_thread_id != main_thread_id
+
+
+@pytest.mark.asyncio
+async def test_async_coroutine_context_builder_not_double_wrapped(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """Async coroutine-функция должна вызываться напрямую (await), без sync_to_async wrapper."""
+    call_count = 0
+
+    async def async_builder():
+        nonlocal call_count
+        call_count += 1
+        return master_context
+
+    client = MockOpenAIClient(MockCompletion(content="ок"))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=async_builder,
+    )
+    await concierge.send_message(
+        user_key=user_key, message_text="x",
+        prompt_renderer=prompt_renderer,
+    )
+    # Builder вызван ровно раз (не дважды через sync_to_async + await)
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_tool_call_raw_persisted_for_audit(
     store, master_context, user_key, prompt_renderer
 ) -> None:

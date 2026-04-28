@@ -70,3 +70,21 @@ def test_action_type_constants_string_values() -> None:
 def test_action_type_all_mvp_is_frozenset() -> None:
     assert isinstance(ActionType.ALL_MVP, frozenset)
     assert len(ActionType.ALL_MVP) == 5
+
+
+def test_handle_helpers_not_in_public_api() -> None:
+    """handle_* helpers — internal, semver-неустойчивы. Caller'ы используют dispatch_tool_call.
+
+    Прямой импорт `from ayla_ai_core.tool_handlers import handle_X` остаётся
+    возможным для тестов и редкой интеграции — это слабый contract, не часть API.
+    """
+    import ayla_ai_core
+    public = set(ayla_ai_core.__all__)
+    leaked_helpers = {n for n in public if n.startswith("handle_")}
+    assert leaked_helpers == set(), f"handle_* leaked into public API: {leaked_helpers}"
+
+
+def test_dispatch_tool_call_is_public_seam() -> None:
+    """dispatch_tool_call — единственный public seam для tool routing."""
+    import ayla_ai_core
+    assert "dispatch_tool_call" in ayla_ai_core.__all__
