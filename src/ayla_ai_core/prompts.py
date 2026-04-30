@@ -138,7 +138,7 @@ SYSTEM_PROMPT_TEMPLATE = """\
 6. Передача менеджеру — last resort. Если можешь ответить или показать
    мастеров/слоты — делай это, не сдавайся.
 7. НЕ запрашивай телефон или email — они уже у нас в профиле клиента.
-8. Если клиент уже постоянный (bookings_count > 0) — учти это в тоне.{memory_hint}
+8. Если клиент уже постоянный (bookings_count > 0) — учти это в тоне.{memory_hint}{extra_hint_block}
 
 ПРАВИЛА ПРИ ПУСТЫХ СЛОТАХ (когда show_slots вернул slots=[]):
 - НЕ заканчивай диалог фразой «нет слотов» — это тупик для клиента.
@@ -209,6 +209,7 @@ def render_system_prompt(
     bookings_count: int,
     specialist_context: SpecialistContext[Any],
     voice_config: BrandVoiceConfig,
+    extra_hint: str = "",
 ) -> str:
     """Render system_prompt с конкретными значениями context'а + brand voice.
 
@@ -217,9 +218,20 @@ def render_system_prompt(
     bookings_count — для tone-adjustment (новый/постоянный клиент).
     specialist_context.summary_text — рендер top-N мастеров с реальными ID.
     voice_config — бренд-специфичные параметры (assistant name, business name, etc).
+    extra_hint — optional cross-domain context block (DRF-248). Empty = no
+        additional content. Caller composes the string from external signals
+        (e.g. nutrition deficits) before passing it; this function trusts it.
+        The block renders as a separate paragraph after the rules so the LLM
+        treats it as advisory context, not a hard rule.
 
     Returns: rendered prompt string. Token budget <2000 для gpt-4o-mini.
     """
+    extra_hint_text = (extra_hint or "").strip()
+    extra_hint_block = (
+        f"\n\nДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ (мягкая подсказка, не правило):\n{extra_hint_text}"
+        if extra_hint_text
+        else ""
+    )
     return SYSTEM_PROMPT_TEMPLATE.format(
         assistant_name=voice_config.assistant_name,
         business_descriptor=_render_business_descriptor(voice_config),
@@ -229,6 +241,7 @@ def render_system_prompt(
         masters_summary=specialist_context.summary_text or "(нет активных мастеров)",
         off_topic_redirect=voice_config.off_topic_redirect,
         memory_hint=_MEMORY_HINT if voice_config.use_long_term_memory_hint else "",
+        extra_hint_block=extra_hint_block,
         examples_block=_render_examples_block(voice_config.examples),
     )
 
