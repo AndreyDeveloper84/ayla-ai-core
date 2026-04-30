@@ -300,3 +300,44 @@ def test_ayla_marketplace_voice_has_expected_values() -> None:
     assert AYLA_MARKETPLACE_VOICE.assistant_name == "Ayla"
     assert AYLA_MARKETPLACE_VOICE.business_address is None
     assert AYLA_MARKETPLACE_VOICE.use_long_term_memory_hint is True
+
+
+# ─── extra_hint kwarg (DRF-248) ────────────────────────────────────────────
+
+
+def test_render_default_has_no_extra_hint_block(render_kwargs) -> None:
+    out = render_system_prompt(voice_config=FORMULA_TELA_VOICE, **render_kwargs)
+    assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" not in out
+
+
+def test_render_with_extra_hint_inserts_paragraph(render_kwargs) -> None:
+    out = render_system_prompt(
+        voice_config=FORMULA_TELA_VOICE,
+        extra_hint="У клиента 3 дня подряд белок ниже нормы.",
+        **render_kwargs,
+    )
+    assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" in out
+    assert "белок ниже нормы" in out
+    # Soft framing — must mark as advisory not a rule.
+    assert "мягкая подсказка" in out
+
+
+def test_render_empty_or_whitespace_extra_hint_is_no_op(render_kwargs) -> None:
+    for value in ("", "   ", "\n\t  \n"):
+        out = render_system_prompt(
+            voice_config=FORMULA_TELA_VOICE,
+            extra_hint=value,
+            **render_kwargs,
+        )
+        assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" not in out
+
+
+def test_render_extra_hint_works_with_ayla_voice_too(render_kwargs) -> None:
+    out = render_system_prompt(
+        voice_config=AYLA_MARKETPLACE_VOICE,
+        extra_hint="Тестовая подсказка.",
+        **render_kwargs,
+    )
+    assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" in out
+    # Memory hint section still present (Ayla voice).
+    assert "помнишь" in out.lower() or "помню" in out.lower()
