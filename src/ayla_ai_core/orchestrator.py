@@ -53,6 +53,7 @@ from ayla_ai_core.context import SpecialistContext
 from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
+    ToolResult,
     _safe_int,
     dispatch_tool_call,
 )
@@ -65,7 +66,17 @@ __all__ = [
     "ChatResponseDTO",
     "ConversationStore",
     "MessageRole",
+    "ToolDispatcher",
 ]
+
+
+# Custom tool dispatcher hook (DRF-241 / 0.6.0).
+# Consumers with their own wire-format (Ayla: show_specialists vs shared
+# show_masters) inject a callable that takes the OpenAI tool_call object
+# + the specialist_context and returns a ToolResult. When None, AIConcierge
+# falls back to the bundled `dispatch_tool_call` — backward-compatible for
+# every existing consumer (default behaviour unchanged).
+ToolDispatcher = Callable[[Any, SpecialistContext[Any]], ToolResult]
 
 
 logger = logging.getLogger("ayla_ai_core.orchestrator")
@@ -179,8 +190,17 @@ def _parse_completion(
     master_resolver: MasterResolver | None,
     service_resolver: ServiceResolver | None,
     id_parser: Callable[[Any], Any],
+    tool_dispatcher: ToolDispatcher | None = None,
 ) -> tuple[str, dict | None, str | None, dict | None]:
-    """Returns (content, tool_call_raw, action_type, action_data)."""
+    """Returns (content, tool_call_raw, action_type, action_data).
+
+    `tool_dispatcher` (DRF-241 / 0.6.0) — opt callable that takes
+    (tool_call, specialist_context) and returns ToolResult. Consumers with
+    their own wire-format (Ayla `show_specialists` vs shared `show_masters`)
+    inject one to keep their own dispatch + handlers without forking the
+    orchestrator. When None, the bundled `dispatch_tool_call` runs — every
+    existing consumer keeps its current behaviour.
+    """
     msg = completion.choices[0].message
     tool_calls = getattr(msg, "tool_calls", None)
     content = msg.content or ""
@@ -191,12 +211,15 @@ def _parse_completion(
     # Берём первый tool_call — наш flow одношаговый (LLM либо текст,
     # либо один tool-call, не цепочка)
     tc = tool_calls[0]
-    result = dispatch_tool_call(
-        tc, specialist_context,
-        master_resolver=master_resolver,
-        service_resolver=service_resolver,
-        id_parser=id_parser,
-    )
+    if tool_dispatcher is not None:
+        result = tool_dispatcher(tc, specialist_context)
+    else:
+        result = dispatch_tool_call(
+            tc, specialist_context,
+            master_resolver=master_resolver,
+            service_resolver=service_resolver,
+            id_parser=id_parser,
+        )
 
     raw = {
         "id": getattr(tc, "id", ""),
@@ -238,6 +261,7 @@ class AIConcierge:
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         tool_definitions: list[dict] | None = None,
         id_parser: Callable[[Any], Any] = _safe_int,
+        tool_dispatcher: ToolDispatcher | None = None,
     ) -> None:
         """Construct AIConcierge.
 
@@ -254,6 +278,14 @@ class AIConcierge:
         id_parser: функция парсинга master_id/service_id из LLM args.
             Default `_safe_int` (бот). Для UUID-консумеров (Ayla) передавать
             `_safe_uuid`. См. tool_handlers.py.
+        tool_dispatcher: opt DI-hook (DRF-241 / 0.6.0). Callable
+            (tool_call, context) → ToolResult. Консумеры с собственным
+            wire-format (Ayla: `show_specialists`/`specialist_id` vs shared
+            `show_masters`/`master_id`) инжектят свой dispatcher и держат
+            локальные tools.py + tool_handlers.py — без форка orchestrator.
+            None (default) → bundled `dispatch_tool_call`. В этом случае
+            id_parser / master_resolver / service_resolver применяются
+            как раньше.
         """
         self._openai_client = openai_client
         self._store = store
@@ -262,6 +294,7 @@ class AIConcierge:
         self._history_limit = history_limit
         self._tool_definitions = tool_definitions or TOOL_DEFINITIONS
         self._id_parser = id_parser
+        self._tool_dispatcher = tool_dispatcher
 
         # async-обёртки для sync ORM-методов store
         self._resolve_conv = sync_to_async(store.resolve_active_conversation)
@@ -351,6 +384,7 @@ class AIConcierge:
             master_resolver=master_resolver,
             service_resolver=service_resolver,
             id_parser=self._id_parser,
+            tool_dispatcher=self._tool_dispatcher,
         )
 
         # 9. Telemetry

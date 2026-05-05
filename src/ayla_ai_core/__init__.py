@@ -51,6 +51,7 @@ from ayla_ai_core.orchestrator import (
     ChatResponseDTO,
     ConversationStore,
     MessageRole,
+    ToolDispatcher,
 )
 from ayla_ai_core.prompts import (
     AYLA_MARKETPLACE_VOICE,
@@ -78,7 +79,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
@@ -109,6 +110,8 @@ __all__ = [
     # Generic context (preferred)
     "SpecialistCandidate",
     "SpecialistContext",
+    # DI hook for custom wire-format consumers (DRF-241 / 0.6.0)
+    "ToolDispatcher",
     "ToolResult",
     "__version__",
     "_safe_int",
