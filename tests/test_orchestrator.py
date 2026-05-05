@@ -592,3 +592,148 @@ async def test_different_user_keys_get_separate_conversations(
 
     assert r1.conversation_id != r2.conversation_id
     assert len(store.conversations) == 2
+
+
+# ─── DRF-241 / 0.6.0 — custom tool_dispatcher DI hook ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_dispatcher_called_when_provided(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """When tool_dispatcher is injected, AIConcierge calls it instead of
+    the bundled dispatch_tool_call. Consumer is responsible for parsing
+    the tool_call (name, arguments) however its local wire-format wants."""
+    from ayla_ai_core.tool_handlers import ToolResult
+
+    captured: dict = {}
+
+    def custom_dispatcher(tool_call, context):
+        captured["name"] = tool_call.function.name
+        captured["args"] = tool_call.function.arguments
+        captured["candidates_seen"] = len(context.candidates)
+        # Consumer's own wire-format — Ayla returns "show_specialists"
+        # not "show_masters".
+        return ToolResult(
+            action_type="show_specialists",
+            action_data={"specialist_ids": ["abc-123"]},
+        )
+
+    client = MockOpenAIClient(MockCompletion(
+        tool_call_name="show_specialists",
+        tool_call_args={"specialist_ids": ["abc-123"], "explanation": "x"},
+    ))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=lambda: master_context,
+        tool_dispatcher=custom_dispatcher,
+    )
+
+    result = await concierge.send_message(
+        user_key=user_key, message_text="хочу маникюр",
+        prompt_renderer=prompt_renderer,
+    )
+
+    assert captured["name"] == "show_specialists"
+    assert "specialist_ids" in captured["args"]
+    assert captured["candidates_seen"] == 2
+    assert result.action_type == "show_specialists"
+    assert result.action_data == {"specialist_ids": ["abc-123"]}
+
+
+@pytest.mark.asyncio
+async def test_default_dispatcher_used_when_tool_dispatcher_is_none(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """Backward-compat: tool_dispatcher=None (default) keeps the bundled
+    dispatch_tool_call path. Every existing consumer keeps current behaviour."""
+    client = MockOpenAIClient(MockCompletion(
+        tool_call_name="show_masters",
+        tool_call_args={"master_ids": [1], "explanation": "ok"},
+    ))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=lambda: master_context,
+        # tool_dispatcher omitted entirely → defaults to None
+    )
+
+    result = await concierge.send_message(
+        user_key=user_key, message_text="x",
+        prompt_renderer=prompt_renderer,
+    )
+
+    # Bundled handler renders "show_masters" via ActionType.SHOW_MASTERS.
+    assert result.action_type == ActionType.SHOW_MASTERS
+
+
+@pytest.mark.asyncio
+async def test_custom_dispatcher_receives_tool_call_object_shape(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """The dispatcher gets the raw OpenAI tool_call object — same shape the
+    bundled dispatch_tool_call expects (`.function.name`, `.function.arguments`).
+    Consumers parse JSON args themselves (they own the wire-format)."""
+    from ayla_ai_core.tool_handlers import ToolResult
+
+    seen_id = []
+
+    def dispatcher(tc, ctx):
+        seen_id.append(getattr(tc, "id", None))
+        return ToolResult(action_type="custom", action_data=None)
+
+    client = MockOpenAIClient(MockCompletion(
+        tool_call_name="anything",
+        tool_call_args={},
+    ))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=lambda: master_context,
+        tool_dispatcher=dispatcher,
+    )
+
+    await concierge.send_message(
+        user_key=user_key, message_text="x",
+        prompt_renderer=prompt_renderer,
+    )
+
+    # MockCompletion sets tool_call.id = "tc_1"; the dispatcher saw it.
+    assert seen_id == ["tc_1"]
+
+
+@pytest.mark.asyncio
+async def test_custom_dispatcher_skips_id_parser_and_resolvers(
+    store, master_context, user_key, prompt_renderer
+) -> None:
+    """When a custom dispatcher is provided, id_parser / master_resolver /
+    service_resolver are NOT applied — the consumer owns validation. This
+    matches Ayla's pattern: local handlers do their own anti-hallucination."""
+    from ayla_ai_core.tool_handlers import ToolResult
+
+    parser_calls = []
+
+    def tracking_parser(value):
+        parser_calls.append(value)
+        return value
+
+    def custom_dispatcher(tool_call, context):
+        return ToolResult(action_type="show_specialists", action_data={})
+
+    client = MockOpenAIClient(MockCompletion(
+        tool_call_name="show_specialists",
+        tool_call_args={"specialist_ids": ["abc"]},
+    ))
+    concierge = AIConcierge(
+        openai_client=client, store=store,
+        context_builder=lambda: master_context,
+        id_parser=tracking_parser,
+        tool_dispatcher=custom_dispatcher,
+    )
+
+    await concierge.send_message(
+        user_key=user_key, message_text="x",
+        prompt_renderer=prompt_renderer,
+    )
+
+    # id_parser was passed but never invoked — custom dispatcher handles
+    # all validation including ID parsing.
+    assert parser_calls == []
