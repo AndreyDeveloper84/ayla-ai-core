@@ -1140,3 +1140,115 @@ class TestHistoryTokenBudget:
         )
         # The instance carries the budget so callers can introspect / override.
         assert concierge._history_token_budget == DEFAULT_HISTORY_TOKEN_BUDGET
+
+
+# ─── v0.7.4 hotfix regression tests ───────────────────────────────────────
+
+
+class TestEncoderCachePerModel:
+    """v0.7.4 fix (Code-Reviewer P0): _get_encoder is keyed per model_name.
+
+    Pre-fix the module-global _tiktoken_encoder pinned to the FIRST model
+    seen for the process lifetime, silently feeding wrong token counts to
+    every subsequent AIConcierge using a different model.
+    """
+
+    def test_get_encoder_returns_distinct_objects_per_model_or_none(self) -> None:
+        """When tiktoken IS installed, distinct model_names produce distinct
+        encoders. When NOT installed, both return None (same object).
+        Either way the result must be deterministic per model_name.
+        """
+        from ayla_ai_core.orchestrator import _get_encoder
+
+        # Clear the lru_cache so a prior test doesn't pollute the assertion.
+        _get_encoder.cache_clear()
+        a = _get_encoder("gpt-4o-mini")
+        b = _get_encoder("gpt-3.5-turbo")
+        # Both None (no tiktoken) → same. Both real encoders → must be
+        # different instances when models differ. The pre-v0.7.4 bug
+        # would alias them.
+        if a is None:
+            assert b is None  # heuristic fallback path
+        else:
+            assert a is not b  # tiktoken: per-model cache works
+        # Same model name returns the same cached object.
+        assert _get_encoder("gpt-4o-mini") is a
+
+
+class TestTokenBudgetRoleOverhead:
+    """v0.7.4 fix: token-budget accounts for per-message envelope overhead
+    so the rendered prompt actually fits the budget. Pre-fix the budget
+    undershot by ~10% on 10-message histories.
+    """
+
+    def test_budget_includes_system_prompt_overhead(self) -> None:
+        """A budget barely sufficient for raw history content but NOT for
+        system_prompt + envelope must drop the oldest entries first."""
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        # System prompt is itself ~50 chars → 12-13 tokens heuristic
+        # + primer overhead + per-message envelope. Budget=30 should
+        # leave room for at most 1 history message (40-char content).
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="X" * 40)
+            for _ in range(5)
+        ]
+        for i, h in enumerate(history):
+            h.content = f"msg-{i} " + "X" * 35
+
+        msgs = _compose_messages(
+            system_prompt="You are a helpful assistant. " * 2,  # ~50 chars
+            history=history,
+            user_text="hi",
+            token_budget=30,
+            model_name="gpt-4o-mini",
+        )
+        # System + new user always present (2 messages minimum).
+        # Whatever history slipped in must respect the budget — pre-fix
+        # this test would have included 2-3 history messages; with the
+        # envelope accounting, it includes 0-1.
+        history_msgs = [m["content"] for m in msgs if m["content"].startswith("msg-")]
+        assert len(history_msgs) <= 1, (
+            f"Expected <=1 history message under tight budget+envelope, "
+            f"got {len(history_msgs)}: {history_msgs}"
+        )
+
+
+class TestObservabilityReExports:
+    """v0.7.4 fix: observability symbols are now reachable from the package
+    root, not just from the submodule."""
+
+    def test_scope_helpers_importable_from_package_root(self) -> None:
+        from ayla_ai_core import (
+            ReplayDeterminismError,
+            TenantContextFilter,
+            current_frozen_now,
+            current_tenant_id,
+            reset_tenant_id,
+            scope_frozen_now,
+            scope_tenant_id,
+            set_tenant_id,
+        )
+
+        # Sanity: each is the same object as the submodule export.
+        from ayla_ai_core.observability import (
+            scope_tenant_id as scope_tenant_id_from_submodule,
+        )
+
+        assert scope_tenant_id is scope_tenant_id_from_submodule
+        # Touch the others so a missing re-export at the symbol level fails fast.
+        assert callable(current_tenant_id)
+        assert callable(current_frozen_now)
+        assert callable(scope_frozen_now)
+        assert callable(set_tenant_id)
+        assert callable(reset_tenant_id)
+        assert issubclass(ReplayDeterminismError, RuntimeError)
+        assert TenantContextFilter is not None
+
+    def test_default_history_token_budget_importable_from_package_root(self) -> None:
+        from ayla_ai_core import DEFAULT_HISTORY_TOKEN_BUDGET
+        from ayla_ai_core.orchestrator import (
+            DEFAULT_HISTORY_TOKEN_BUDGET as SUBMODULE_DEFAULT,
+        )
+
+        assert DEFAULT_HISTORY_TOKEN_BUDGET == SUBMODULE_DEFAULT == 4000

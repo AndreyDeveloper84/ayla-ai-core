@@ -40,6 +40,7 @@ Sync vs Async:
 """
 from __future__ import annotations
 
+import functools
 import inspect
 import logging
 import time
@@ -97,39 +98,53 @@ DEFAULT_MODEL_NAME = "gpt-4o-mini"
 # context (cost ceiling, not correctness).
 DEFAULT_HISTORY_TOKEN_BUDGET = 4000
 
+# v0.7.4: per-message OpenAI envelope overhead constants. Used by the
+# token-budget guard so the budget reflects actual completion cost, not
+# just raw content. See _compose_messages for rationale.
+_MSG_ENVELOPE_TOKENS = 4
+_PRIMER_OVERHEAD_TOKENS = 3
 
-_tiktoken_encoder: Any = None
-_tiktoken_fallback_warned = False
+
+# v0.7.4 (DRF-684 follow-up): cache is keyed on model_name, not process-global.
+# Pre-fix: a multi-model deployment (one AIConcierge on gpt-4o-mini, another on
+# claude-haiku) silently reused whichever encoder loaded first → wrong token
+# counts on the second model. lru_cache(maxsize=8) keys per-model so each
+# model gets its own encoder, sized to the realistic number of models a
+# single process serves.
+_tiktoken_unavailable_warned = False
 
 
+def _warn_tiktoken_missing_once() -> None:
+    """Emit the tiktoken-missing fallback warning exactly once per process."""
+    global _tiktoken_unavailable_warned
+    if _tiktoken_unavailable_warned:
+        return
+    logger.warning(
+        "tiktoken not installed — history token budget falling back "
+        "to a 4-chars-per-token heuristic. Install with "
+        "`uv pip install ayla-ai-core[tiktoken]` for accurate counting.",
+        extra={"tenant_id": ""},
+    )
+    _tiktoken_unavailable_warned = True
+
+
+@functools.lru_cache(maxsize=8)
 def _get_encoder(model_name: str) -> Any:
     """Return a cached tiktoken encoder for ``model_name``, or ``None``
-    if tiktoken is not installed. Lazy + memoised so the first send_message
-    pays the import + load cost, subsequent calls reuse the encoder.
+    if tiktoken is not installed. v0.7.4 (Code-Reviewer P0 fix): keyed
+    per model so multi-model processes don't share a single encoder.
     """
-    global _tiktoken_encoder, _tiktoken_fallback_warned
-    if _tiktoken_encoder is not None:
-        return _tiktoken_encoder
     try:
         import tiktoken  # type: ignore[import-not-found]
     except ImportError:
-        if not _tiktoken_fallback_warned:
-            logger.warning(
-                "tiktoken not installed — history token budget falling back "
-                "to a 4-chars-per-token heuristic. Install with "
-                "`uv pip install ayla-ai-core[tiktoken]` for accurate counting.",
-                extra={"tenant_id": ""},
-            )
-            _tiktoken_fallback_warned = True
+        _warn_tiktoken_missing_once()
         return None
     try:
-        encoder = tiktoken.encoding_for_model(model_name)
+        return tiktoken.encoding_for_model(model_name)
     except KeyError:
         # Model not recognised by tiktoken (custom model name etc.) —
         # fall back to the universal cl100k_base which covers gpt-4 family.
-        encoder = tiktoken.get_encoding("cl100k_base")
-    _tiktoken_encoder = encoder
-    return encoder
+        return tiktoken.get_encoding("cl100k_base")
 
 
 def _estimate_tokens(text: str, encoder: Any) -> int:
@@ -265,16 +280,30 @@ def _compose_messages(
     # Pre-walk newest-first to pick the longest tail that fits within the
     # budget. Replay an oldest-first compose afterwards so OpenAI sees the
     # correct chronological order.
+    #
+    # v0.7.4 (DRF-684 follow-up): account for OpenAI's per-message envelope
+    # overhead. Constants live at module level (see _MSG_ENVELOPE_TOKENS,
+    # _PRIMER_OVERHEAD_TOKENS) — every chat-completions request pays ~4
+    # tokens per message + ~3 for the primer; without this the budget
+    # undershoots by ~10% on a 10-message history.
     filtered_history: list[Any]
     if token_budget is not None:
-        used = 0
+        # Account for the system prompt + primer before the budget is spent
+        # on history. Without this, system_prompt slips past the cap.
+        used = (
+            _PRIMER_OVERHEAD_TOKENS
+            + _estimate_tokens(system_prompt, encoder)
+            + _MSG_ENVELOPE_TOKENS
+            + _estimate_tokens(user_text, encoder)
+            + _MSG_ENVELOPE_TOKENS
+        )
         kept: list[Any] = []
         for h in reversed(history):
             h_role = getattr(h, "role", None)
             if h_role not in (MessageRole.USER, MessageRole.ASSISTANT):
                 continue
             content = getattr(h, "content", "") or ""
-            tokens = _estimate_tokens(content, encoder)
+            tokens = _estimate_tokens(content, encoder) + _MSG_ENVELOPE_TOKENS
             if used + tokens > token_budget:
                 break
             kept.append(h)

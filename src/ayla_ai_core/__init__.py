@@ -44,8 +44,19 @@ from ayla_ai_core.context import (
     build_specialist_context_from_candidates,
     render_summary_text,
 )
+from ayla_ai_core.observability import (
+    ReplayDeterminismError,
+    TenantContextFilter,
+    current_frozen_now,
+    current_tenant_id,
+    reset_tenant_id,
+    scope_frozen_now,
+    scope_tenant_id,
+    set_tenant_id,
+)
 from ayla_ai_core.orchestrator import (
     DEFAULT_HISTORY_LIMIT,
+    DEFAULT_HISTORY_TOKEN_BUDGET,
     DEFAULT_MODEL_NAME,
     AIConcierge,
     ChatResponseDTO,
@@ -79,7 +90,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
@@ -88,6 +99,7 @@ __all__ = [
     "AYLA_MARKETPLACE_VOICE",
     "CONFIRM_BOOKING",
     "DEFAULT_HISTORY_LIMIT",
+    "DEFAULT_HISTORY_TOKEN_BUDGET",
     "DEFAULT_MODEL_NAME",
     "FORMULA_TELA_VOICE",
     "ID_T",
@@ -106,10 +118,13 @@ __all__ = [
     "MasterContext",
     "MasterResolver",
     "MessageRole",
+    # v0.7.3 observability surface (re-exported in v0.7.4 — DRF-681..684 follow-up)
+    "ReplayDeterminismError",
     "ServiceResolver",
     # Generic context (preferred)
     "SpecialistCandidate",
     "SpecialistContext",
+    "TenantContextFilter",
     # DI hook for custom wire-format consumers (DRF-241 / 0.6.0)
     "ToolDispatcher",
     "ToolResult",
@@ -119,7 +134,13 @@ __all__ = [
     "build_master_context_from_candidates",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
+    "current_frozen_now",
+    "current_tenant_id",
     "dispatch_tool_call",
     "render_summary_text",
     "render_system_prompt",
+    "reset_tenant_id",
+    "scope_frozen_now",
+    "scope_tenant_id",
+    "set_tenant_id",
 ]
