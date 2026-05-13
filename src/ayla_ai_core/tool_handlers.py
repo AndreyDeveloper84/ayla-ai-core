@@ -259,10 +259,11 @@ def handle_show_masters(
     if not valid_pairs:
         return _fallback_clarification("show_masters_no_valid_ids")
 
-    by_id = {c.id: c for c in context.candidates}
+    # v0.7.2 (DRF-677): O(1) lookups via pre-computed by_id (was a fresh
+    # dict comprehension on every call). Built once at context construction.
     masters: list[dict[str, Any]] = []
     for orig_idx, mid in valid_pairs:
-        c = by_id[mid]
+        c = context.by_id[mid]
         masters.append({
             "master": {
                 "id": c.id,
@@ -310,12 +311,14 @@ def handle_show_slots(
     except (ValueError, TypeError):
         return _fallback_clarification("show_slots_invalid_date")
 
-    # Cross-validation: master.services должен содержать service
-    master = next((c for c in context.candidates if c.id == master_id), None)
+    # Cross-validation: master.services должен содержать service.
+    # v0.7.2 (DRF-677): O(1) by_id lookup + pre-computed service_id_set on
+    # each candidate. Was `next(... for c in candidates if c.id == master_id)`
+    # + set-comprehension per call at O(N²) for N=1000.
+    master = context.by_id.get(master_id)
     if master is None:
         return _fallback_clarification("show_slots_master_lost")
-    master_service_ids = {sid for sid, _ in master.services}
-    if service_id not in master_service_ids:
+    if service_id not in master.service_id_set:
         return _fallback_clarification(
             "show_slots_master_does_not_offer_service",
             question="Этот мастер не оказывает данную услугу. Подобрать другого?",
@@ -371,11 +374,11 @@ def handle_confirm_booking(
     # Cross-validation: master.services должен содержать service (mirror handle_show_slots).
     # Без этого LLM trust boundary leak: (master_id=Анна, service_id=Бориса) проходит,
     # потому что service_id в global candidate_service_ids — но мастер его не оказывает.
-    master = next((c for c in context.candidates if c.id == master_id), None)
+    # v0.7.2 (DRF-677): O(1) by_id + service_id_set (was O(N²) per call).
+    master = context.by_id.get(master_id)
     if master is None:
         return _fallback_clarification("confirm_booking_master_lost")
-    master_service_ids = {sid for sid, _ in master.services}
-    if service_id not in master_service_ids:
+    if service_id not in master.service_id_set:
         return _fallback_clarification(
             "confirm_booking_master_does_not_offer_service",
             question="Этот мастер не оказывает данную услугу. Подобрать другого?",

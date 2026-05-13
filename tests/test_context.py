@@ -162,3 +162,61 @@ def test_master_context_helper_also_requires_tenant_id() -> None:
 
     with pytest.raises(ValueError, match="tenant_id is required"):
         build_master_context_from_candidates([], tenant_id="")
+
+
+# ─── DRF-677 (v0.7.2 Perf-1): O(1) lookups via by_id + service_id_set ─────
+
+
+def test_builder_populates_by_id_for_o1_handler_lookups() -> None:
+    """v0.7.2: SpecialistContext.by_id maps {id -> candidate} after build."""
+    candidates = [
+        MasterCandidate(id=1, name="Anna", specialization="massage", services=[(10, "back")]),
+        MasterCandidate(id=2, name="Boris", specialization="manicure", services=[(11, "nails")]),
+    ]
+    ctx = build_master_context_from_candidates(candidates, tenant_id="t")
+    assert set(ctx.by_id.keys()) == {1, 2}
+    assert ctx.by_id[1].name == "Anna"
+    assert ctx.by_id[2].name == "Boris"
+
+
+def test_builder_populates_service_id_set_per_candidate() -> None:
+    """v0.7.2: each SpecialistCandidate carries a frozenset of its service IDs."""
+    candidates = [
+        MasterCandidate(
+            id=1, name="Anna", specialization="massage",
+            services=[(10, "back"), (11, "lymph")],
+        ),
+    ]
+    ctx = build_master_context_from_candidates(candidates, tenant_id="t")
+    assert ctx.candidates[0].service_id_set == frozenset({10, 11})
+
+
+def test_direct_constructor_auto_populates_by_id_post_init() -> None:
+    """v0.7.2: direct SpecialistContext(...) keeps backward-compat.
+
+    Callers that bypass the builder don't have to compute by_id themselves;
+    __post_init__ auto-populates from candidates when by_id is the default
+    empty dict.
+    """
+    from ayla_ai_core.context import SpecialistContext
+
+    candidates = [
+        MasterCandidate(id=1, name="A", specialization="m", services=[(10, "s")]),
+    ]
+    ctx = SpecialistContext(
+        candidates=candidates,
+        candidate_ids=frozenset({1}),
+        candidate_service_ids=frozenset({10}),
+        summary_text="",
+        tenant_id="t",
+        # by_id intentionally omitted — defaults to {} then auto-populates.
+    )
+    assert ctx.by_id == {1: candidates[0]}
+
+
+def test_direct_candidate_auto_populates_service_id_set_post_init() -> None:
+    """v0.7.2: direct SpecialistCandidate(...) keeps backward-compat too."""
+    c = MasterCandidate(
+        id=1, name="A", specialization="m", services=[(10, "s"), (11, "t")]
+    )
+    assert c.service_id_set == frozenset({10, 11})
