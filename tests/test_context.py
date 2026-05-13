@@ -58,14 +58,14 @@ def test_build_context_collects_all_service_ids_across_masters() -> None:
         MasterCandidate(id=1, name="A", specialization="", services=[(10, "s1"), (11, "s2")]),
         MasterCandidate(id=2, name="B", specialization="", services=[(11, "s2"), (12, "s3")]),
     ]
-    ctx = build_master_context_from_candidates(candidates)
+    ctx = build_master_context_from_candidates(candidates, tenant_id="test-tenant")
     assert ctx.candidate_ids == frozenset({1, 2})
     assert ctx.candidate_service_ids == frozenset({10, 11, 12})  # дедуп через set
     assert ctx.summary_text  # не пустой
 
 
 def test_build_context_empty_returns_empty_frozensets() -> None:
-    ctx = build_master_context_from_candidates([])
+    ctx = build_master_context_from_candidates([], tenant_id="test-tenant")
     assert ctx.candidate_ids == frozenset()
     assert ctx.candidate_service_ids == frozenset()
     assert "нет активных мастеров" in ctx.summary_text
@@ -80,6 +80,7 @@ def test_master_context_is_frozen() -> None:
         candidate_ids=frozenset(),
         candidate_service_ids=frozenset(),
         summary_text="x",
+        tenant_id="test-tenant",
     )
     import pytest
 
@@ -120,7 +121,7 @@ def test_specialist_context_with_uuid_ids() -> None:
         SpecialistCandidate(id=uid_a, name="Анна", specialization="массаж", services=[(sid_x, "массаж")]),
         SpecialistCandidate(id=uid_b, name="Борис", specialization="спа", services=[(sid_x, "массаж")]),
     ]
-    ctx = build_specialist_context_from_candidates(candidates)
+    ctx = build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
     assert uid_a in ctx.candidate_ids
     assert sid_x in ctx.candidate_service_ids
     # summary_text использует str(c.id) — UUIDs render-friendly
@@ -135,18 +136,29 @@ def test_specialist_context_with_tenant_id() -> None:
     assert ctx.tenant_id == "formula-tela"
 
 
-def test_specialist_context_default_tenant_is_none() -> None:
-    """Single-tenant случай (бот) — tenant_id остаётся None."""
+def test_specialist_context_requires_tenant_id_kwarg() -> None:
+    """v0.7.0 BREAKING: tenant_id is mandatory — empty/missing raises.
+
+    Was in v0.6.x: defaulted to None for single-tenant cases. Removed because
+    multi-tenant isolation is a security boundary, not a feature flag.
+    Consumers pass a stable sentinel (e.g., "formula-tela") even in single-tenant.
+    """
+    import pytest
+
     from ayla_ai_core.context import build_specialist_context_from_candidates
 
-    ctx = build_specialist_context_from_candidates([])
-    assert ctx.tenant_id is None
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        build_specialist_context_from_candidates([], tenant_id="")
+    with pytest.raises(TypeError):
+        # tenant_id is kwarg-only; positional should fail
+        build_specialist_context_from_candidates([])  # type: ignore[call-arg]
 
 
-def test_master_context_helper_no_tenant_id_param() -> None:
-    """Backward compat helper не принимает tenant_id (бот single-tenant)."""
+def test_master_context_helper_also_requires_tenant_id() -> None:
+    """v0.7.0 BREAKING: deprecated helper also gates on tenant_id."""
+    import pytest
+
     from ayla_ai_core.context import build_master_context_from_candidates
 
-    ctx = build_master_context_from_candidates([])
-    # tenant_id остаётся None для бота
-    assert ctx.tenant_id is None
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        build_master_context_from_candidates([], tenant_id="")

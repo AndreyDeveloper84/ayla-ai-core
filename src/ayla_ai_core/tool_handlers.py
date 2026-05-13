@@ -65,9 +65,17 @@ logger = logging.getLogger("ayla_ai_core.tool_handlers")
 
 # Optional resolvers для confirm_booking enrichment.
 # Возвращают dict с полями name (str), price_from (Decimal | str | None),
-# duration_min (int | None) — ИЛИ None если объект не найден.
-MasterResolver = Callable[[Any], dict[str, Any] | None]
-ServiceResolver = Callable[[Any], dict[str, Any] | None]
+# duration_min (int | None), и (v0.7.0) optional `tenant_id` для cross-tenant
+# guard. None если объект не найден.
+#
+# **v0.7.0 breaking change**: resolvers must accept a kwarg-only `tenant_id`:
+#     def my_resolver(value: int, *, tenant_id: str) -> dict | None: ...
+# The dispatcher passes ``context.tenant_id`` so the resolver can scope its
+# ORM query (e.g., ``Master.objects.filter(id=value, tenant_id=tenant_id)``).
+# Cross-tenant scoping at the resolver layer prevents a leak where the LLM
+# emits a valid id from another tenant's history cached in the prompt.
+MasterResolver = Callable[..., dict[str, Any] | None]
+ServiceResolver = Callable[..., dict[str, Any] | None]
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,20 @@ def _fallback_clarification(reason: str, *, question: str = "") -> ToolResult:
     )
 
 
+def _assert_tenant_id_set(context: SpecialistContext[Any]) -> None:
+    """B3 (v0.7.0): refuse to dispatch on a context lacking tenant_id.
+
+    Multi-tenant isolation is a security boundary — silently allowing a
+    context with empty/missing tenant_id was the v0.6.x footgun that let
+    cross-tenant leakage slip past static checks. Fail loud at every
+    handler entry so the bug surfaces in tests, not in production.
+    """
+    if not getattr(context, "tenant_id", ""):
+        raise ValueError(
+            "context.tenant_id required for tenant-scoped dispatch (v0.7.0)"
+        )
+
+
 # ─── handle_show_masters ──────────────────────────────────────────────────
 
 
@@ -154,23 +176,38 @@ def handle_show_masters(
     id_parser: int для бота (default), UUID для Ayla, custom callable для
     других консумеров.
     """
+    _assert_tenant_id_set(context)
+
     raw_ids = args.get("master_ids") or []
     scores = args.get("match_scores") or []
     reasons = args.get("match_reasons") or []
     explanation = args.get("explanation") or ""
 
+    # B2 (v0.7.0): align scores/reasons with the LLM-emitted INDEX of each
+    # id, not with the post-filter index. Filtering hallucinated IDs
+    # previously misaligned the surviving entries — Anna (id=1) inherited
+    # the score the model assigned to the hallucinated id=999. Carry
+    # (original_idx, normalized_id) through filtering + dedup so each
+    # surviving master maps back to its original score/reason slot.
     valid_ids_normalized = [id_parser(rid) for rid in raw_ids]
-    valid_ids = [
-        vid for vid in valid_ids_normalized
-        if vid is not None and vid in context.candidate_ids
-    ]
+    valid_pairs: list[tuple[int, Any]] = []
+    seen: set[Any] = set()
+    for orig_idx, vid in enumerate(valid_ids_normalized):
+        if vid is None or vid not in context.candidate_ids:
+            continue
+        # Dedup: LLM occasionally emits master_ids=[1, 1, 1]; render
+        # exactly one card per master.
+        if vid in seen:
+            continue
+        seen.add(vid)
+        valid_pairs.append((orig_idx, vid))
 
-    if not valid_ids:
+    if not valid_pairs:
         return _fallback_clarification("show_masters_no_valid_ids")
 
     by_id = {c.id: c for c in context.candidates}
     masters: list[dict[str, Any]] = []
-    for idx, mid in enumerate(valid_ids):
+    for orig_idx, mid in valid_pairs:
         c = by_id[mid]
         masters.append({
             "master": {
@@ -179,8 +216,8 @@ def handle_show_masters(
                 "specialization": c.specialization,
                 "services_preview": [name for _, name in c.services[:5]],
             },
-            "match_score": scores[idx] if idx < len(scores) else None,
-            "match_reasons": reasons[idx] if idx < len(reasons) else [],
+            "match_score": scores[orig_idx] if orig_idx < len(scores) else None,
+            "match_reasons": reasons[orig_idx] if orig_idx < len(reasons) else [],
         })
 
     return ToolResult(
@@ -204,6 +241,8 @@ def handle_show_slots(
     layer консумера. Handler делает только валидацию args + проверку что
     мастер действительно оказывает выбранную услугу.
     """
+    _assert_tenant_id_set(context)
+
     master_id = id_parser(args.get("master_id"))
     service_id = id_parser(args.get("service_id"))
     date_str = args.get("date") or ""
@@ -258,7 +297,14 @@ def handle_confirm_booking(
     action_data полями master_name / service_name / price_from / duration_min
     (для рендера confirmation card). Если не предоставлены — поля None,
     caller дополняет в render layer.
+
+    **v0.7.0**: resolvers вызываются с kwarg ``tenant_id=context.tenant_id``
+    для cross-tenant scoping. Если resolver возвращает dict с ключом
+    ``tenant_id``, его значение сверяется с ``context.tenant_id`` — mismatch
+    бросает в ASK_CLARIFICATION.
     """
+    _assert_tenant_id_set(context)
+
     master_id = id_parser(args.get("master_id"))
     service_id = id_parser(args.get("service_id"))
     datetime_str = args.get("datetime") or ""
@@ -301,20 +347,35 @@ def handle_confirm_booking(
     # — отдельный fallback с конкретным user-facing question + отдельным reason
     # tag для ops-наблюдаемости.
     if master_resolver is not None:
-        master_data = master_resolver(master_id)
+        master_data = master_resolver(master_id, tenant_id=context.tenant_id)
         if master_data is None:
             return _fallback_clarification(
                 "confirm_booking_master_unavailable",
                 question="Этот мастер больше недоступен. Подобрать другого?",
             )
+        # B3 cross-tenant guard: if the resolver returns the row's tenant_id,
+        # verify it matches. Defends against a stale prompt referencing a
+        # different tenant's master that got past the candidate_ids check.
+        master_tenant_id = master_data.get("tenant_id")
+        if master_tenant_id is not None and master_tenant_id != context.tenant_id:
+            return _fallback_clarification(
+                "confirm_booking_master_tenant_mismatch",
+                question="Подбор обновился — давайте подберём заново?",
+            )
         action_data["master_name"] = master_data.get("name")
 
     if service_resolver is not None:
-        service_data = service_resolver(service_id)
+        service_data = service_resolver(service_id, tenant_id=context.tenant_id)
         if service_data is None:
             return _fallback_clarification(
                 "confirm_booking_service_unavailable",
                 question="Эта услуга временно недоступна. Подобрать другую?",
+            )
+        service_tenant_id = service_data.get("tenant_id")
+        if service_tenant_id is not None and service_tenant_id != context.tenant_id:
+            return _fallback_clarification(
+                "confirm_booking_service_tenant_mismatch",
+                question="Подбор обновился — давайте подберём заново?",
             )
         action_data["service_name"] = service_data.get("name")
         # price_from coercion: Decimal не JSON-serializable, а action_data уйдёт
@@ -381,7 +442,12 @@ def dispatch_tool_call(
     id_parser — функция для парсинга master_id/service_id из LLM args.
     Default `_safe_int` (бот). Для UUID-консумеров (Ayla) пере давать
     `_safe_uuid`.
+
+    **v0.7.0**: ``context.tenant_id`` обязателен — пустое значение бросает
+    ``ValueError`` (security boundary, fail-loud at entry).
     """
+    _assert_tenant_id_set(context)
+
     name = getattr(tool_call.function, "name", "") or ""
     raw_args = getattr(tool_call.function, "arguments", "") or "{}"
 

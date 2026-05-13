@@ -178,7 +178,18 @@ def _compose_messages(
         h_role = getattr(h, "role", None)
         if h_role not in (MessageRole.USER, MessageRole.ASSISTANT):
             continue
-        messages.append({"role": h_role, "content": getattr(h, "content", "") or ""})
+        content = getattr(h, "content", "") or ""
+        # B1 (v0.7.0): OpenAI rejects assistant turns with empty content and
+        # no tool_calls. Such records appear when a prior turn invoked a tool
+        # without emitting text — keeping them poisons every subsequent
+        # completion in the conversation. Preserve assistant turns that DO
+        # carry tool_calls (those carry the function-call payload OpenAI
+        # needs to maintain the call/response pairing).
+        if h_role == MessageRole.ASSISTANT and not content:
+            tool_calls = getattr(h, "tool_calls", None)
+            if not tool_calls:
+                continue
+        messages.append({"role": h_role, "content": content})
     messages.append({"role": MessageRole.USER, "content": user_text})
     return messages
 

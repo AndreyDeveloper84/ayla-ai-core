@@ -135,7 +135,8 @@ def master_context():
         MasterCandidate(id=2, name="Борис", specialization="спа",
                         services=[(11, "СПА")]),
     ]
-    return build_master_context_from_candidates(candidates)
+    # v0.7.0: tenant_id mandatory. Synthetic test value — clearly not real.
+    return build_master_context_from_candidates(candidates, tenant_id="test-tenant")
 
 
 @pytest.fixture
@@ -737,3 +738,86 @@ async def test_custom_dispatcher_skips_id_parser_and_resolvers(
     # id_parser was passed but never invoked — custom dispatcher handles
     # all validation including ID parsing.
     assert parser_calls == []
+
+
+# ─── B1 regression tests (v0.7.0) ─────────────────────────────────────────
+
+
+class TestComposeMessages:
+    """B1 (v0.7.0): _compose_messages must skip assistant turns whose
+    content is empty AND tool_calls is empty.
+
+    OpenAI rejects such messages with HTTP 400 after the first
+    tool_call lands in conversation history. Assistant turns that
+    DO carry tool_calls are preserved — those messages encode the
+    function-call pairing the API needs.
+    """
+
+    @staticmethod
+    def _compose(history, *, system_prompt="sys", user_text="hi"):
+        # Import locally so we don't reshape the module-level test imports.
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        return _compose_messages(
+            system_prompt=system_prompt, history=history, user_text=user_text
+        )
+
+    def test_skips_empty_assistant_turns_without_tool_calls(self):
+        """History [user, assistant("", no tool_calls), user] → 4 msgs
+        (system + user + user + new user), not 5 — the empty assistant
+        turn is dropped."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="prev question"),
+            SimpleNamespace(role=MessageRole.ASSISTANT, content="", tool_calls=None),
+            SimpleNamespace(role=MessageRole.USER, content="follow-up"),
+        ]
+        msgs = self._compose(history)
+        assert len(msgs) == 4
+        assert msgs[0]["role"] == "system"
+        assert [m["role"] for m in msgs[1:]] == [
+            MessageRole.USER,
+            MessageRole.USER,
+            MessageRole.USER,
+        ]
+        # The two history user contents survive, plus the new user_text.
+        contents = [m["content"] for m in msgs[1:]]
+        assert contents == ["prev question", "follow-up", "hi"]
+
+    def test_keeps_assistant_with_tool_calls_even_if_content_empty(self):
+        """Assistant turns carrying tool_calls are preserved even when
+        content is empty — OpenAI needs the call/response pairing."""
+        tool_call_stub = SimpleNamespace(id="tc_1", function=SimpleNamespace())
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="book me a slot"),
+            SimpleNamespace(
+                role=MessageRole.ASSISTANT, content="", tool_calls=[tool_call_stub]
+            ),
+        ]
+        msgs = self._compose(history)
+        # system + user + assistant("") + new user
+        assert len(msgs) == 4
+        assert msgs[2]["role"] == MessageRole.ASSISTANT
+        assert msgs[2]["content"] == ""
+
+    def test_keeps_assistant_with_content_even_if_no_tool_calls(self):
+        """Normal assistant text turns are unaffected."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="q"),
+            SimpleNamespace(
+                role=MessageRole.ASSISTANT, content="my answer", tool_calls=None
+            ),
+        ]
+        msgs = self._compose(history)
+        assert len(msgs) == 4
+        assert msgs[2]["content"] == "my answer"
+
+    def test_filters_non_user_assistant_roles(self):
+        """system/tool roles in history are dropped — pre-existing behaviour."""
+        history = [
+            SimpleNamespace(role="system", content="old prompt"),
+            SimpleNamespace(role=MessageRole.USER, content="hello"),
+            SimpleNamespace(role="tool", content="result"),
+        ]
+        msgs = self._compose(history)
+        # system + user(hello) + new user(hi)
+        assert len(msgs) == 3
