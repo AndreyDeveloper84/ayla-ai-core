@@ -90,6 +90,61 @@ logger = logging.getLogger("ayla_ai_core.orchestrator")
 DEFAULT_HISTORY_LIMIT = 10
 DEFAULT_MODEL_NAME = "gpt-4o-mini"
 
+# v0.7.3 / Obs-4 (DRF-684). Default per-turn history-token budget. The
+# count-based DEFAULT_HISTORY_LIMIT is still applied at the load_recent_history
+# layer (DB-side); the token budget is the second cap, enforced inside
+# _compose_messages so a verbose 10-message history can't blow the LLM
+# context (cost ceiling, not correctness).
+DEFAULT_HISTORY_TOKEN_BUDGET = 4000
+
+
+_tiktoken_encoder: Any = None
+_tiktoken_fallback_warned = False
+
+
+def _get_encoder(model_name: str) -> Any:
+    """Return a cached tiktoken encoder for ``model_name``, or ``None``
+    if tiktoken is not installed. Lazy + memoised so the first send_message
+    pays the import + load cost, subsequent calls reuse the encoder.
+    """
+    global _tiktoken_encoder, _tiktoken_fallback_warned
+    if _tiktoken_encoder is not None:
+        return _tiktoken_encoder
+    try:
+        import tiktoken  # type: ignore[import-not-found]
+    except ImportError:
+        if not _tiktoken_fallback_warned:
+            logger.warning(
+                "tiktoken not installed — history token budget falling back "
+                "to a 4-chars-per-token heuristic. Install with "
+                "`uv pip install ayla-ai-core[tiktoken]` for accurate counting.",
+                extra={"tenant_id": ""},
+            )
+            _tiktoken_fallback_warned = True
+        return None
+    try:
+        encoder = tiktoken.encoding_for_model(model_name)
+    except KeyError:
+        # Model not recognised by tiktoken (custom model name etc.) —
+        # fall back to the universal cl100k_base which covers gpt-4 family.
+        encoder = tiktoken.get_encoding("cl100k_base")
+    _tiktoken_encoder = encoder
+    return encoder
+
+
+def _estimate_tokens(text: str, encoder: Any) -> int:
+    """Count tokens for ``text``. Uses tiktoken when ``encoder`` is set,
+    otherwise the 4-chars-per-token heuristic (good to ~10% for Latin /
+    Cyrillic mix in our domain — exact value isn't critical because the
+    budget guard is a cost ceiling, not a hard context-window cap).
+    """
+    if encoder is None:
+        # Heuristic: ~4 chars/token for mixed Latin + Cyrillic. Rough but
+        # bounded — if we get within 20% of the budget we're successfully
+        # protecting per-turn cost from chatty users.
+        return max(1, len(text) // 4)
+    return len(encoder.encode(text))
+
 
 class MessageRole:
     """Role wire-format. String values чтобы Django TextChoices совпадали."""
@@ -190,15 +245,47 @@ def _compose_messages(
     system_prompt: str,
     history: list[Any],
     user_text: str,
+    token_budget: int | None = None,
+    model_name: str = DEFAULT_MODEL_NAME,
 ) -> list[dict[str, Any]]:
     """OpenAI-format messages: system + history + new user.
 
     history elements должны иметь .role и .content атрибуты (duck-typed).
     Tool/system messages в истории пропускаются — на текущей итерации
     multi-step tool-use не делается.
+
+    v0.7.3 (DRF-684): when ``token_budget`` is set, history is walked
+    newest-first and accumulates until the budget is exhausted; older
+    messages drop. ``system_prompt`` and ``user_text`` are always
+    included (their cost is independent of replay history). When
+    ``token_budget`` is ``None`` the count-based pre-filter remains the
+    only cap — backward-compatible with v0.7.2.
     """
+    encoder = _get_encoder(model_name) if token_budget is not None else None
+    # Pre-walk newest-first to pick the longest tail that fits within the
+    # budget. Replay an oldest-first compose afterwards so OpenAI sees the
+    # correct chronological order.
+    filtered_history: list[Any]
+    if token_budget is not None:
+        used = 0
+        kept: list[Any] = []
+        for h in reversed(history):
+            h_role = getattr(h, "role", None)
+            if h_role not in (MessageRole.USER, MessageRole.ASSISTANT):
+                continue
+            content = getattr(h, "content", "") or ""
+            tokens = _estimate_tokens(content, encoder)
+            if used + tokens > token_budget:
+                break
+            kept.append(h)
+            used += tokens
+        kept.reverse()
+        filtered_history = kept
+    else:
+        filtered_history = history
+
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    for h in history:
+    for h in filtered_history:
         h_role = getattr(h, "role", None)
         if h_role not in (MessageRole.USER, MessageRole.ASSISTANT):
             continue
@@ -339,6 +426,7 @@ class AIConcierge:
         context_builder: Callable[[], Any],
         model_name: str = DEFAULT_MODEL_NAME,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
+        history_token_budget: int | None = DEFAULT_HISTORY_TOKEN_BUDGET,
         tool_definitions: list[dict] | None = None,
         id_parser: Callable[[Any], Any] = _safe_int,
         tool_dispatcher: ToolDispatcher | None = None,
@@ -372,6 +460,7 @@ class AIConcierge:
         self._context_builder = context_builder
         self._model_name = model_name
         self._history_limit = history_limit
+        self._history_token_budget = history_token_budget
         self._tool_definitions = tool_definitions or TOOL_DEFINITIONS
         self._id_parser = id_parser
         self._tool_dispatcher = tool_dispatcher
@@ -453,10 +542,13 @@ class AIConcierge:
             system_prompt = prompt_renderer(specialist_context)
 
             # 6. Compose for OpenAI
+            # v0.7.3 (DRF-684): token-budget guard caps per-turn history cost.
             llm_messages = _compose_messages(
                 system_prompt=system_prompt,
                 history=history,
                 user_text=message_text,
+                token_budget=self._history_token_budget,
+                model_name=self._model_name,
             )
 
             # 7. Call OpenAI с tools

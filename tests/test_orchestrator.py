@@ -1066,3 +1066,77 @@ class TestChatResponseDTOTelemetry:
         assert dto.tokens_out == 0
         assert dto.model == ""
         assert dto.provider == ""
+
+
+# ─── DRF-684 (v0.7.3 / Obs-4): history token-budget guard ─────────────────
+
+
+class TestHistoryTokenBudget:
+    """v0.7.3: cap per-turn history by token budget, not just message count.
+    Walks newest-first, includes messages until budget exhausted, drops
+    older ones. Heuristic fallback when tiktoken unavailable (covered).
+    """
+
+    @staticmethod
+    def _compose(history, budget):
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        return _compose_messages(
+            system_prompt="sys",
+            history=history,
+            user_text="hi",
+            token_budget=budget,
+            model_name="gpt-4o-mini",
+        )
+
+    def test_budget_keeps_newest_drops_oldest(self) -> None:
+        """5 messages × ~100 tokens each, budget=250 → only ~2 newest fit."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="A" * 400)
+            for _ in range(5)
+        ]
+        # Tag each with a distinct content so we can prove which survived.
+        for i, h in enumerate(history):
+            h.content = f"msg-{i} " + "X" * 395  # ~100 tokens via 4-chars/token
+
+        msgs = self._compose(history, budget=250)
+        # Strip the system + new-user wrapping; only history remains in middle.
+        history_msgs = [m["content"] for m in msgs if m["content"].startswith("msg-")]
+        # The youngest messages must be kept; the oldest must be dropped.
+        assert len(history_msgs) >= 1  # at least the newest fits
+        assert "msg-4" in " ".join(history_msgs)  # newest definitely kept
+        assert "msg-0" not in " ".join(history_msgs)  # oldest dropped
+
+    def test_budget_none_disables_guard_backward_compat(self) -> None:
+        """token_budget=None → no token-based filtering; whole history kept.
+        This matches v0.7.2 behaviour for callers that opt out."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content=f"msg-{i} " + "X" * 1000)
+            for i in range(5)
+        ]
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        msgs = _compose_messages(
+            system_prompt="sys",
+            history=history,
+            user_text="hi",
+            token_budget=None,
+            model_name="gpt-4o-mini",
+        )
+        # system + 5 history + 1 user = 7
+        assert len(msgs) == 7
+
+    def test_concierge_default_budget_engages(self, store, master_context, user_key, prompt_renderer) -> None:
+        """AIConcierge built with default settings uses DEFAULT_HISTORY_TOKEN_BUDGET."""
+        from ayla_ai_core.orchestrator import (
+            DEFAULT_HISTORY_TOKEN_BUDGET,
+            AIConcierge,
+        )
+
+        concierge = AIConcierge(
+            openai_client=MockOpenAIClient(MockCompletion(content="ok")),
+            store=store,
+            context_builder=lambda: master_context,
+        )
+        # The instance carries the budget so callers can introspect / override.
+        assert concierge._history_token_budget == DEFAULT_HISTORY_TOKEN_BUDGET

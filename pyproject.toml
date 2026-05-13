@@ -29,6 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# tiktoken — accurate token counting for the v0.7.3 history token-budget
+# guard (Obs-4). The library falls back to a 4-chars-per-token heuristic
+# when tiktoken is unavailable, but production consumers should install
+# this extra so per-turn cost ceilings stay honest.
+tiktoken = ["tiktoken>=0.7"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
