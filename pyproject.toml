@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ayla-ai-core"
-version = "0.7.2"
+version = "0.7.3"
 description = "Shared AI orchestration core for Ayla and Formula tela bot — AIConcierge, tools, anti-hallucination, multi-tenant brand voices"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,6 +29,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# tiktoken — accurate token counting for the v0.7.3 history token-budget
+# guard (Obs-4). The library falls back to a 4-chars-per-token heuristic
+# when tiktoken is unavailable, but production consumers should install
+# this extra so per-turn cost ceilings stay honest.
+tiktoken = ["tiktoken>=0.7"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

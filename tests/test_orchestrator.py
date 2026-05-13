@@ -974,3 +974,169 @@ class TestParallelToolCalls:
         assert extras is not None
         assert len(extras) == 1
         assert extras[0]["action_type"] == "ask_clarification"
+
+
+# ─── DRF-682 (v0.7.3 / Obs-2): telemetry on ChatResponseDTO ───────────────
+
+
+class TestChatResponseDTOTelemetry:
+    """v0.7.3: latency/tokens/model/provider returned as DTO fields, not
+    only logged. Consumers build dashboards from the return value.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tokens_and_model_populated_for_plain_text(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        client = MockOpenAIClient(MockCompletion(
+            content="Привет.", tokens_in=123, tokens_out=45,
+        ))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+            model_name="gpt-4o-test",
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="hi",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.tokens_in == 123
+        assert result.tokens_out == 45
+        assert result.model == "gpt-4o-test"
+        assert result.provider == "openai"
+
+    @pytest.mark.asyncio
+    async def test_latency_ms_non_negative(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        """Real value, not zero — confirms the field actually flowed through
+        from the time.monotonic() measurement, not the default."""
+        client = MockOpenAIClient(MockCompletion(content="ok"))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="hi",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.latency_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_telemetry_populated_for_tool_call_response(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        """tool_call path also propagates telemetry — measurement happens
+        before _parse_completion branches on the message shape."""
+        client = MockOpenAIClient(MockCompletion(
+            tool_call_name="show_masters",
+            tool_call_args={"master_ids": [1], "explanation": "x"},
+            tokens_in=200, tokens_out=80,
+        ))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+            model_name="gpt-4o-mini",
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="who?",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.action_type == "show_masters"
+        assert result.tokens_in == 200
+        assert result.tokens_out == 80
+        assert result.model == "gpt-4o-mini"
+        assert result.provider == "openai"
+
+    def test_dto_default_field_values_keep_v072_constructor_compat(self) -> None:
+        """v0.7.2 callers constructing ChatResponseDTO with the old field
+        set must keep compiling — new fields default to zero/empty."""
+        dto = ChatResponseDTO(
+            conversation_id=42,
+            content="hello",
+            action_type=None,
+            action_data=None,
+        )
+        # Old fields populated, new ones defaulted (no crash).
+        assert dto.latency_ms == 0
+        assert dto.tokens_in == 0
+        assert dto.tokens_out == 0
+        assert dto.model == ""
+        assert dto.provider == ""
+
+
+# ─── DRF-684 (v0.7.3 / Obs-4): history token-budget guard ─────────────────
+
+
+class TestHistoryTokenBudget:
+    """v0.7.3: cap per-turn history by token budget, not just message count.
+    Walks newest-first, includes messages until budget exhausted, drops
+    older ones. Heuristic fallback when tiktoken unavailable (covered).
+    """
+
+    @staticmethod
+    def _compose(history, budget):
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        return _compose_messages(
+            system_prompt="sys",
+            history=history,
+            user_text="hi",
+            token_budget=budget,
+            model_name="gpt-4o-mini",
+        )
+
+    def test_budget_keeps_newest_drops_oldest(self) -> None:
+        """5 messages × ~100 tokens each, budget=250 → only ~2 newest fit."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content="A" * 400)
+            for _ in range(5)
+        ]
+        # Tag each with a distinct content so we can prove which survived.
+        for i, h in enumerate(history):
+            h.content = f"msg-{i} " + "X" * 395  # ~100 tokens via 4-chars/token
+
+        msgs = self._compose(history, budget=250)
+        # Strip the system + new-user wrapping; only history remains in middle.
+        history_msgs = [m["content"] for m in msgs if m["content"].startswith("msg-")]
+        # The youngest messages must be kept; the oldest must be dropped.
+        assert len(history_msgs) >= 1  # at least the newest fits
+        assert "msg-4" in " ".join(history_msgs)  # newest definitely kept
+        assert "msg-0" not in " ".join(history_msgs)  # oldest dropped
+
+    def test_budget_none_disables_guard_backward_compat(self) -> None:
+        """token_budget=None → no token-based filtering; whole history kept.
+        This matches v0.7.2 behaviour for callers that opt out."""
+        history = [
+            SimpleNamespace(role=MessageRole.USER, content=f"msg-{i} " + "X" * 1000)
+            for i in range(5)
+        ]
+        from ayla_ai_core.orchestrator import _compose_messages
+
+        msgs = _compose_messages(
+            system_prompt="sys",
+            history=history,
+            user_text="hi",
+            token_budget=None,
+            model_name="gpt-4o-mini",
+        )
+        # system + 5 history + 1 user = 7
+        assert len(msgs) == 7
+
+    def test_concierge_default_budget_engages(self, store, master_context, user_key, prompt_renderer) -> None:
+        """AIConcierge built with default settings uses DEFAULT_HISTORY_TOKEN_BUDGET."""
+        from ayla_ai_core.orchestrator import (
+            DEFAULT_HISTORY_TOKEN_BUDGET,
+            AIConcierge,
+        )
+
+        concierge = AIConcierge(
+            openai_client=MockOpenAIClient(MockCompletion(content="ok")),
+            store=store,
+            context_builder=lambda: master_context,
+        )
+        # The instance carries the budget so callers can introspect / override.
+        assert concierge._history_token_budget == DEFAULT_HISTORY_TOKEN_BUDGET

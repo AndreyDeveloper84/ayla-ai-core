@@ -11,6 +11,64 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-05-13
+
+Observability + replay-determinism patch. Library logs gain a stable
+`tenant_id` field, `ChatResponseDTO` carries telemetry, replay harnesses
+get a frozen-clock contract, and per-turn history is now token-bounded.
+All four additions are non-breaking for v0.7.2 consumers.
+
+### Added
+
+- **New module** `ayla_ai_core.observability` (DRF-681 / Obs-1)
+  - `current_tenant_id()` / `scope_tenant_id()` / `set_tenant_id()` /
+    `reset_tenant_id()` — `ContextVar`-backed tenant scope (async-safe).
+  - `TenantContextFilter` — auto-populates `record.tenant_id` when a
+    third-party log site forgets `extra=`.
+  - Every library log record now carries `tenant_id` (5 call sites in
+    `orchestrator` + `tool_handlers`). No format-string changes — grep
+    of existing log lines still works.
+
+- **Telemetry on `ChatResponseDTO`** (DRF-682 / Obs-2)
+  - New optional fields with neutral zero/empty defaults:
+    `latency_ms`, `tokens_in`, `tokens_out`, `model`, `provider`.
+  - Populated from existing `time.monotonic()` + `completion.usage`
+    measurements in `send_message`. No logging change — values are now
+    *also* returned, so consumers can build Prometheus / StatsD
+    dashboards from the data path instead of grepping log strings.
+
+- **Frozen-clock contract** (DRF-683 / Obs-3)
+  - `AIConcierge.send_message(..., frozen_now: datetime | None = None)`
+    binds the value via `scope_frozen_now()` for the full LLM round
+    trip + tool dispatch. Renderers and history filters can read it via
+    `current_frozen_now()` for byte-identical replay.
+  - `ReplayDeterminismError(RuntimeError)` — sentinel that consumers
+    and custom dispatchers raise when an operation would break replay.
+
+- **History token-budget guard** (DRF-684 / Obs-4)
+  - `AIConcierge.__init__(..., history_token_budget: int | None = 4000)`
+    caps per-turn history cost. `_compose_messages` walks newest-first,
+    keeps messages until the budget is exhausted, drops older ones
+    (chronological order preserved in the output to OpenAI).
+  - New `[tiktoken]` optional extra for accurate token counting
+    (`uv pip install ayla-ai-core[tiktoken]`). When the extra is not
+    installed, falls back to a 4-chars-per-token heuristic and emits
+    a single `WARNING` log on first use.
+  - `token_budget=None` disables the guard entirely (v0.7.2 behaviour).
+
+### Changed
+
+- `_parse_completion` parallel-tool-calls log + `_fallback_clarification`
+  warning + `_check_resolver_tenant` opt-out warning + `send_message`
+  turn-summary log all now pass `extra={"tenant_id": ...}` (DRF-681).
+
+### Not breaking
+
+All four changes are pure additions. v0.7.2 consumers see no signature
+change at any public entry point. `ChatResponseDTO` positional-arg
+constructors still compile because new fields are appended with
+defaults. The new `[tiktoken]` extra is opt-in.
+
 ## [0.7.2] — 2026-05-13
 
 Performance + security hardening from the 6-agent v0.6.0 review. v0.7.1
