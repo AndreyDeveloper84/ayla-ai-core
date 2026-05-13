@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ayla-ai-core"
-version = "0.7.3"
+version = "0.7.4"
 description = "Shared AI orchestration core for Ayla and Formula tela bot — AIConcierge, tools, anti-hallucination, multi-tenant brand voices"
 readme = "README.md"
 requires-python = ">=3.12"

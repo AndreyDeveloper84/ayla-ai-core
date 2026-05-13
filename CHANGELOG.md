@@ -11,6 +11,49 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-05-13
+
+Post-release hotfix surfaced by an in-depth code review of v0.7.0 → v0.7.3
+diff (Code-Reviewer skill, 2026-05-13). Three fixes; none breaking.
+
+### Fixed
+
+- **Encoder cache is now keyed per-model** (Code-Reviewer P0). Pre-v0.7.4
+  the module-global `_tiktoken_encoder` pinned to the FIRST model seen by
+  the process and silently fed the wrong token counts to every subsequent
+  `AIConcierge` using a different model — wrong history truncation,
+  wrong dashboard numbers. Replaced with `functools.lru_cache(maxsize=8)`
+  keyed on `model_name`. Single-model deployments are unaffected.
+- **Token budget now accounts for per-message envelope overhead.** OpenAI
+  chat-completions bills ~4 tokens per message + ~3 tokens for the system
+  primer. v0.7.3's budget walk counted only `content` and undershot the
+  budget by ~10% on a typical 10-message history. Constants
+  `_MSG_ENVELOPE_TOKENS = 4` and `_PRIMER_OVERHEAD_TOKENS = 3` now
+  participate in the walk. Real prompts now fit the budget.
+
+### Added
+
+- **Re-exported v0.7.3 observability surface from package root.** v0.7.3
+  shipped `scope_tenant_id`, `current_tenant_id`, `scope_frozen_now`,
+  `current_frozen_now`, `TenantContextFilter`, `ReplayDeterminismError`,
+  `set_tenant_id`, `reset_tenant_id`, and `DEFAULT_HISTORY_TOKEN_BUDGET`
+  but only from the submodule. Consumers now `from ayla_ai_core import
+  scope_tenant_id` (instead of `.observability.scope_tenant_id`) per the
+  v0.7.3 release-note implication. Tests pinned in
+  `TestObservabilityReExports` so accidental removal fails CI.
+
+### Test plan
+
+Suite: **184/184 pass** (was 180; +4 new regression tests:
+encoder-per-model, budget-envelope-respect, observability-re-exports,
+default-budget-from-package-root). ruff + mypy clean.
+
+### Migration
+
+None. Pure additive — consumers see no signature change. The encoder
+cache and budget changes affect runtime behaviour (more accurate),
+not API.
+
 ## [0.7.3] — 2026-05-13
 
 Observability + replay-determinism patch. Library logs gain a stable
