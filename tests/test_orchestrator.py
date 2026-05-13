@@ -821,3 +821,156 @@ class TestComposeMessages:
         msgs = self._compose(history)
         # system + user(hello) + new user(hi)
         assert len(msgs) == 3
+
+
+# ─── DRF-678 (v0.7.2 Perf-2): parallel tool_calls support ─────────────────
+
+
+def _fake_completion_multi(tool_calls_specs: list[tuple[str, dict]]) -> SimpleNamespace:
+    """Build a completion stub carrying multiple tool_calls.
+
+    Each entry of ``tool_calls_specs`` is ``(name, args_dict)``; tool_call id
+    is auto-numbered ``tc_0``, ``tc_1``, ... so tests can assert which
+    primary call won.
+    """
+    tool_calls = [
+        SimpleNamespace(
+            id=f"tc_{i}",
+            function=SimpleNamespace(name=name, arguments=json.dumps(args)),
+        )
+        for i, (name, args) in enumerate(tool_calls_specs)
+    ]
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="", tool_calls=tool_calls),
+            ),
+        ],
+    )
+
+
+class TestParallelToolCalls:
+    """v0.7.2 (DRF-678): _parse_completion must dispatch every tool_call,
+    not just ``[0]``. gpt-4o emits 2-3 parallel calls with parallel_tool_calls=True
+    by default, and v0.7.0 silently dropped tail items (real prod data loss).
+
+    Merge strategy: "first non-clarification wins" for the primary; all
+    remaining results return as ``extra_actions`` in original order.
+    """
+
+    @staticmethod
+    def _parse(master_context, tool_calls_specs):
+        from ayla_ai_core.orchestrator import _parse_completion
+        from ayla_ai_core.tool_handlers import _safe_int
+
+        return _parse_completion(
+            _fake_completion_multi(tool_calls_specs),
+            master_context,
+            master_resolver=None,
+            service_resolver=None,
+            id_parser=_safe_int,
+        )
+
+    def test_single_tool_call_extra_actions_is_none(self, master_context):
+        """Backward-compat: 1 tool_call -> extra_actions == None (v0.7.0 shape)."""
+        _content, raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [("show_masters", {"master_ids": [1], "explanation": "Лучший"})],
+        )
+        assert action_type == "show_masters"
+        assert extras is None
+        assert raw["id"] == "tc_0"
+
+    def test_double_tool_call_primary_first_non_clarification(self, master_context):
+        """2 calls, both concrete -> primary == [0], extras == [1]."""
+        _content, raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [
+                ("show_masters", {"master_ids": [1], "explanation": "Сначала покажу мастеров"}),
+                ("show_slots", {"master_id": 1, "service_id": 10, "date": "2026-05-20"}),
+            ],
+        )
+        assert action_type == "show_masters"
+        assert raw["id"] == "tc_0"
+        assert extras == [
+            {
+                "action_type": "show_slots",
+                "action_data": {"master_id": 1, "service_id": 10, "date": "2026-05-20"},
+            },
+        ]
+
+    def test_triple_tool_call_carries_all_extras_in_order(self, master_context):
+        """3 calls -> primary first non-clarification, 2 extras in order."""
+        _content, _raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [
+                ("show_masters", {"master_ids": [1], "explanation": "Шаг 1"}),
+                ("show_slots", {"master_id": 1, "service_id": 10, "date": "2026-05-21"}),
+                ("show_my_bookings", {"filter": "upcoming"}),
+            ],
+        )
+        assert action_type == "show_masters"
+        assert extras is not None
+        assert len(extras) == 2
+        assert [e["action_type"] for e in extras] == ["show_slots", "show_my_bookings"]
+
+    def test_clarification_first_promotes_next_non_clarification_to_primary(
+        self, master_context,
+    ):
+        """v0.7.2 merge rule: clarification at [0], concrete action at [1]
+        -> primary becomes the concrete action; clarification carried in
+        extras.
+
+        Real-world trigger: gpt-4o sometimes emits an ask_clarification
+        alongside a show_masters when it's unsure but still has candidates.
+        Prior to v0.7.2 the clarification would silently shadow the
+        useful action because we only read [0]."""
+        _content, raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [
+                ("ask_clarification", {"question": "Какой день удобнее?"}),
+                ("show_masters", {"master_ids": [1], "explanation": "Пока вот мастер"}),
+            ],
+        )
+        assert action_type == "show_masters"
+        assert raw["id"] == "tc_1"  # primary's raw is the show_masters call
+        assert extras is not None
+        assert [e["action_type"] for e in extras] == ["ask_clarification"]
+
+    def test_all_clarifications_falls_back_to_first(self, master_context):
+        """No non-clarification result -> first clarification is the primary."""
+        _content, raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [
+                ("ask_clarification", {"question": "Когда?"}),
+                ("ask_clarification", {"question": "С кем?"}),
+            ],
+        )
+        assert action_type == "ask_clarification"
+        assert raw["id"] == "tc_0"
+        assert extras == [
+            {
+                "action_type": "ask_clarification",
+                "action_data": {"question": "С кем?", "options": []},
+            },
+        ]
+
+    def test_hallucinated_id_in_middle_drops_to_clarification_extra(
+        self, master_context,
+    ):
+        """Tool call with hallucinated id -> ASK_CLARIFICATION; sibling
+        valid calls still come through as primary + extras."""
+        _content, _raw, action_type, _action_data, extras = self._parse(
+            master_context,
+            [
+                ("show_slots", {"master_id": 999, "service_id": 10, "date": "2026-05-20"}),
+                ("show_masters", {"master_ids": [1], "explanation": "Take this one"}),
+            ],
+        )
+        # First call hallucinated -> fallback to ask_clarification (handlers
+        # are side-effect-free, the clarification just rides along in extras).
+        # Second call wins because it's concrete.
+        assert action_type == "show_masters"
+        assert extras is not None
+        assert len(extras) == 1
+        assert extras[0]["action_type"] == "ask_clarification"

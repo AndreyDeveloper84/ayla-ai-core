@@ -159,6 +159,60 @@ def _assert_tenant_id_set(context: SpecialistContext[Any]) -> None:
         )
 
 
+# Sentinel attribute name. Setting it to True on a resolver callable opts that
+# resolver out of the v0.7.2 mandatory-tenant_id check. Use only when the
+# resolver genuinely cannot supply tenant_id (e.g., wrapping legacy code that
+# returns plain rows); audit and remove the opt-out for any resolver that
+# touches user-tenant data.
+RESOLVER_SKIPS_TENANT_CHECK_ATTR = "__resolver_skips_tenant_check__"
+
+
+def _check_resolver_tenant(
+    resolved: dict[str, Any],
+    *,
+    expected_tenant_id: str,
+    resolver: Any,
+    resolver_kind: str,
+) -> str | None:
+    """v0.7.2 Sec-1: enforce that a resolver returned a row scoped to the
+    caller's tenant.
+
+    Returns ``None`` if the check passes; otherwise a short reason tag the
+    caller appends to its fallback identifier. Three outcomes:
+
+    1. **Pass** (return ``None``) — ``resolved["tenant_id"] == expected_tenant_id``.
+    2. **Missing** (return ``"resolver_no_tenant_id"``) — resolver returned a
+       dict without a ``tenant_id`` field. Was permissive in v0.7.0 (assumed
+       resolver was scoped at the ORM layer); v0.7.2 treats it as a hard fail
+       so the bug surfaces in tests rather than as a quiet cross-tenant leak.
+    3. **Mismatch** (return ``"tenant_mismatch"``) — resolver returned a row
+       belonging to a different tenant. Same fallback as v0.7.0.
+
+    **Opt-out**: setting the ``__resolver_skips_tenant_check__`` attribute on
+    the resolver callable to ``True`` makes the check a no-op (returns
+    ``None`` immediately) and emits a single ``WARNING`` per call so it stays
+    visible in audit logs. Reserved for resolvers wrapping legacy code that
+    can't include tenant_id in its return; new resolvers MUST include
+    tenant_id and not use this escape hatch.
+    """
+    if getattr(resolver, RESOLVER_SKIPS_TENANT_CHECK_ATTR, False):
+        logger.warning(
+            "ai.tool_call.resolver_skips_tenant_check resolver=%s kind=%s "
+            "expected_tenant_id=%s — opt-out should be removed",
+            getattr(resolver, "__name__", repr(resolver)),
+            resolver_kind,
+            expected_tenant_id,
+        )
+        return None
+
+    tenant_id = resolved.get("tenant_id")
+    if tenant_id is None:
+        return "resolver_no_tenant_id"
+    if tenant_id != expected_tenant_id:
+        return "tenant_mismatch"
+    return None
+
+
 # ─── handle_show_masters ──────────────────────────────────────────────────
 
 
@@ -205,10 +259,11 @@ def handle_show_masters(
     if not valid_pairs:
         return _fallback_clarification("show_masters_no_valid_ids")
 
-    by_id = {c.id: c for c in context.candidates}
+    # v0.7.2 (DRF-677): O(1) lookups via pre-computed by_id (was a fresh
+    # dict comprehension on every call). Built once at context construction.
     masters: list[dict[str, Any]] = []
     for orig_idx, mid in valid_pairs:
-        c = by_id[mid]
+        c = context.by_id[mid]
         masters.append({
             "master": {
                 "id": c.id,
@@ -256,12 +311,14 @@ def handle_show_slots(
     except (ValueError, TypeError):
         return _fallback_clarification("show_slots_invalid_date")
 
-    # Cross-validation: master.services должен содержать service
-    master = next((c for c in context.candidates if c.id == master_id), None)
+    # Cross-validation: master.services должен содержать service.
+    # v0.7.2 (DRF-677): O(1) by_id lookup + pre-computed service_id_set on
+    # each candidate. Was `next(... for c in candidates if c.id == master_id)`
+    # + set-comprehension per call at O(N²) for N=1000.
+    master = context.by_id.get(master_id)
     if master is None:
         return _fallback_clarification("show_slots_master_lost")
-    master_service_ids = {sid for sid, _ in master.services}
-    if service_id not in master_service_ids:
+    if service_id not in master.service_id_set:
         return _fallback_clarification(
             "show_slots_master_does_not_offer_service",
             question="Этот мастер не оказывает данную услугу. Подобрать другого?",
@@ -317,11 +374,11 @@ def handle_confirm_booking(
     # Cross-validation: master.services должен содержать service (mirror handle_show_slots).
     # Без этого LLM trust boundary leak: (master_id=Анна, service_id=Бориса) проходит,
     # потому что service_id в global candidate_service_ids — но мастер его не оказывает.
-    master = next((c for c in context.candidates if c.id == master_id), None)
+    # v0.7.2 (DRF-677): O(1) by_id + service_id_set (was O(N²) per call).
+    master = context.by_id.get(master_id)
     if master is None:
         return _fallback_clarification("confirm_booking_master_lost")
-    master_service_ids = {sid for sid, _ in master.services}
-    if service_id not in master_service_ids:
+    if service_id not in master.service_id_set:
         return _fallback_clarification(
             "confirm_booking_master_does_not_offer_service",
             question="Этот мастер не оказывает данную услугу. Подобрать другого?",
@@ -353,13 +410,20 @@ def handle_confirm_booking(
                 "confirm_booking_master_unavailable",
                 question="Этот мастер больше недоступен. Подобрать другого?",
             )
-        # B3 cross-tenant guard: if the resolver returns the row's tenant_id,
-        # verify it matches. Defends against a stale prompt referencing a
-        # different tenant's master that got past the candidate_ids check.
-        master_tenant_id = master_data.get("tenant_id")
-        if master_tenant_id is not None and master_tenant_id != context.tenant_id:
+        # v0.7.2 Sec-1 (B3 follow-up): strict cross-tenant guard. Resolver
+        # MUST return a dict with tenant_id; missing → fallback. Defends
+        # against a stale prompt referencing a different tenant's master
+        # that got past the candidate_ids check. Opt-out per resolver via
+        # __resolver_skips_tenant_check__ = True (warns).
+        reason = _check_resolver_tenant(
+            master_data,
+            expected_tenant_id=context.tenant_id,
+            resolver=master_resolver,
+            resolver_kind="master",
+        )
+        if reason is not None:
             return _fallback_clarification(
-                "confirm_booking_master_tenant_mismatch",
+                f"confirm_booking_master_{reason}",
                 question="Подбор обновился — давайте подберём заново?",
             )
         action_data["master_name"] = master_data.get("name")
@@ -371,10 +435,15 @@ def handle_confirm_booking(
                 "confirm_booking_service_unavailable",
                 question="Эта услуга временно недоступна. Подобрать другую?",
             )
-        service_tenant_id = service_data.get("tenant_id")
-        if service_tenant_id is not None and service_tenant_id != context.tenant_id:
+        reason = _check_resolver_tenant(
+            service_data,
+            expected_tenant_id=context.tenant_id,
+            resolver=service_resolver,
+            resolver_kind="service",
+        )
+        if reason is not None:
             return _fallback_clarification(
-                "confirm_booking_service_tenant_mismatch",
+                f"confirm_booking_service_{reason}",
                 question="Подбор обновился — давайте подберём заново?",
             )
         action_data["service_name"] = service_data.get("name")

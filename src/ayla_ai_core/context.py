@@ -20,7 +20,7 @@ Wire format (JSON Schema field names в tools.py):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 from uuid import UUID
 
@@ -50,12 +50,32 @@ class SpecialistCandidate[ID_T: (int, UUID, str)]:
     services — список (service_id, name) для cross-validation в handle_show_slots
     и handle_confirm_booking (handler проверяет что выбранная услуга действительно
     принадлежит specialist'у — anti-hallucination layer 2).
+
+    v0.7.2 (DRF-677): ``service_id_set`` — frozenset of ``sid`` values from
+    ``services`` for O(1) membership checks in handlers. Populated by
+    :func:`build_specialist_context_from_candidates`; for direct construction
+    pass either an explicit frozenset or let the default `field(default_factory=...)`
+    compute it (deferred to consumer; here we keep an empty default so we
+    don't break v0.7.0 callers that construct via direct keyword args).
     """
 
     id: ID_T
     name: str
     specialization: str
     services: list[tuple[ID_T, str]]
+    # NEW in v0.7.2: pre-computed for O(1) `sid in candidate.service_id_set` in
+    # handlers. Defaults to empty frozenset; __post_init__ auto-populates
+    # from `services` so direct-constructor callers stay backward-compatible
+    # without manually computing it.
+    service_id_set: frozenset[ID_T] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        # v0.7.2 (DRF-677): auto-populate when caller didn't pass an explicit
+        # service_id_set. Frozen dataclass: must use object.__setattr__.
+        if not self.service_id_set and self.services:
+            object.__setattr__(
+                self, "service_id_set", frozenset(sid for sid, _ in self.services)
+            )
 
 
 @dataclass(frozen=True)
@@ -81,6 +101,18 @@ class SpecialistContext[ID_T: (int, UUID, str)]:
     candidate_service_ids: frozenset[ID_T]
     summary_text: str
     tenant_id: str
+    # NEW in v0.7.2: precomputed `{candidate.id -> candidate}` for O(1)
+    # handler lookups. Defaults to empty dict; __post_init__ auto-populates
+    # from `candidates` so direct-constructor callers stay backward-compatible.
+    by_id: dict[ID_T, SpecialistCandidate[ID_T]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # v0.7.2 (DRF-677): auto-populate when caller didn't pass an explicit
+        # by_id. Frozen dataclass: must use object.__setattr__.
+        if not self.by_id and self.candidates:
+            object.__setattr__(
+                self, "by_id", {c.id: c for c in self.candidates}
+            )
 
 
 def render_summary_text[ID_T: (int, UUID, str)](candidates: list[SpecialistCandidate[ID_T]]) -> str:
@@ -134,15 +166,32 @@ def build_specialist_context_from_candidates[ID_T: (int, UUID, str)](
         raise ValueError(
             "tenant_id is required (v0.7.0); pass a non-empty stable identifier"
         )
+    # v0.7.2 (DRF-677): pre-compute O(1) lookup structures. Replaces a
+    # linear scan in each handler at N=20 (1-2ms) -> O(N²) at N=1000
+    # (50-100ms) — breached per-turn budget at SaaS catalog scale.
+    # Re-wrap candidates with their service_id_set so handler can do
+    # `service_id in candidate.service_id_set` instead of rebuilding the
+    # set on every tool call.
+    candidates_with_sets: list[SpecialistCandidate[ID_T]] = [
+        SpecialistCandidate(
+            id=c.id,
+            name=c.name,
+            specialization=c.specialization,
+            services=c.services,
+            service_id_set=frozenset(sid for sid, _ in c.services),
+        )
+        for c in candidates
+    ]
     all_service_ids: set[ID_T] = set()
-    for c in candidates:
-        all_service_ids.update(sid for sid, _ in c.services)
+    for c in candidates_with_sets:
+        all_service_ids.update(c.service_id_set)
     return SpecialistContext(
-        candidates=candidates,
-        candidate_ids=frozenset(c.id for c in candidates),
+        candidates=candidates_with_sets,
+        candidate_ids=frozenset(c.id for c in candidates_with_sets),
         candidate_service_ids=frozenset(all_service_ids),
-        summary_text=render_summary_text(candidates),
+        summary_text=render_summary_text(candidates_with_sets),
         tenant_id=tenant_id,
+        by_id={c.id: c for c in candidates_with_sets},
     )
 
 

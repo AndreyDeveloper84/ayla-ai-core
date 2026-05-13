@@ -57,7 +57,7 @@ from ayla_ai_core.tool_handlers import (
     _safe_int,
     dispatch_tool_call,
 )
-from ayla_ai_core.tools import TOOL_DEFINITIONS
+from ayla_ai_core.tools import TOOL_DEFINITIONS, ActionType
 
 __all__ = [
     "DEFAULT_HISTORY_LIMIT",
@@ -100,14 +100,23 @@ class ChatResponseDTO:
 
     conversation_id — для caller'а чтобы продолжать тот же диалог.
     content — текст assistant-а (может быть пустым если LLM сразу tool_call'нул).
-    action_type / action_data — tool action для UI рендера. None если LLM
+    action_type / action_data — primary tool action для UI рендера. None если LLM
     ответил pure-text (small-talk).
+
+    extra_actions (v0.7.2 / DRF-678) — additional tool actions when the LLM
+    emits multiple parallel tool_calls (gpt-4o + ``parallel_tool_calls=True``).
+    Each entry is ``{"action_type": str, "action_data": dict}``. ``None`` when
+    the response had 0 or 1 tool_call (backward-compat with v0.7.0/v0.6.x).
+    Primary (action_type/action_data) is the first non-clarification result;
+    extras carry the rest in their original order. Callers that don't render
+    compound actions can safely ignore this field.
     """
 
     conversation_id: Any  # UUID для бота / Ayla, может быть int в legacy
     content: str
     action_type: str | None
     action_data: dict[str, Any] | None
+    extra_actions: list[dict[str, Any]] | None = None
 
 
 @runtime_checkable
@@ -202,8 +211,8 @@ def _parse_completion(
     service_resolver: ServiceResolver | None,
     id_parser: Callable[[Any], Any],
     tool_dispatcher: ToolDispatcher | None = None,
-) -> tuple[str, dict | None, str | None, dict | None]:
-    """Returns (content, tool_call_raw, action_type, action_data).
+) -> tuple[str, dict | None, str | None, dict | None, list[dict[str, Any]] | None]:
+    """Returns (content, primary_tool_call_raw, action_type, action_data, extra_actions).
 
     `tool_dispatcher` (DRF-241 / 0.6.0) — opt callable that takes
     (tool_call, specialist_context) and returns ToolResult. Consumers with
@@ -211,33 +220,77 @@ def _parse_completion(
     inject one to keep their own dispatch + handlers without forking the
     orchestrator. When None, the bundled `dispatch_tool_call` runs — every
     existing consumer keeps its current behaviour.
+
+    **v0.7.2 (DRF-678)**: dispatches **every** entry in ``tool_calls``, not
+    just ``[0]``. gpt-4o defaults ``parallel_tool_calls=True`` and routinely
+    emits 2-3 calls — v0.7.0 silently dropped tail items. Merge strategy:
+
+    1. First result whose ``action_type != ask_clarification`` becomes the
+       primary (returned as ``action_type`` / ``action_data``).
+    2. All other dispatched results are returned in ``extra_actions`` in the
+       order the LLM emitted them. Consumers that only render the primary
+       action can ignore this field — single-call responses still yield
+       ``extra_actions=None`` exactly as v0.7.0.
+    3. ``primary_tool_call_raw`` is the raw payload of the primary call (the
+       one whose ToolResult became primary) so persistence keeps a stable
+       pointer to "which call did we render".
     """
     msg = completion.choices[0].message
     tool_calls = getattr(msg, "tool_calls", None)
     content = msg.content or ""
 
     if not tool_calls:
-        return content, None, None, None
+        return content, None, None, None, None
 
-    # Берём первый tool_call — наш flow одношаговый (LLM либо текст,
-    # либо один tool-call, не цепочка)
-    tc = tool_calls[0]
-    if tool_dispatcher is not None:
-        result = tool_dispatcher(tc, specialist_context)
+    # Dispatch every tool_call in order. Handlers are side-effect-free
+    # (validation + action_data formation only), so running all of them is
+    # safe even if we end up presenting just one.
+    dispatched: list[tuple[Any, Any]] = []  # (tool_call, ToolResult)
+    for tc in tool_calls:
+        if tool_dispatcher is not None:
+            result = tool_dispatcher(tc, specialist_context)
+        else:
+            result = dispatch_tool_call(
+                tc, specialist_context,
+                master_resolver=master_resolver,
+                service_resolver=service_resolver,
+                id_parser=id_parser,
+            )
+        dispatched.append((tc, result))
+
+    # "First non-clarification wins" — clarifications are fallback noise from
+    # hallucinated ids etc.; promote the first concrete action ahead of them
+    # so a (clarification, show_masters) pair from a confused gpt-4o still
+    # renders the masters card.
+    primary_idx = next(
+        (i for i, (_, r) in enumerate(dispatched)
+         if r.action_type != ActionType.ASK_CLARIFICATION),
+        0,
+    )
+    primary_tc, primary_result = dispatched[primary_idx]
+
+    primary_raw = {
+        "id": getattr(primary_tc, "id", ""),
+        "name": getattr(primary_tc.function, "name", ""),
+        "arguments": getattr(primary_tc.function, "arguments", ""),
+    }
+
+    extra_actions: list[dict[str, Any]] | None
+    if len(dispatched) == 1:
+        # Backward-compat: single-call responses match v0.7.0 shape exactly.
+        extra_actions = None
     else:
-        result = dispatch_tool_call(
-            tc, specialist_context,
-            master_resolver=master_resolver,
-            service_resolver=service_resolver,
-            id_parser=id_parser,
+        extra_actions = [
+            {"action_type": r.action_type, "action_data": r.action_data}
+            for i, (_, r) in enumerate(dispatched)
+            if i != primary_idx
+        ]
+        logger.info(
+            "ai_concierge.parallel_tool_calls count=%d primary=%s",
+            len(dispatched), primary_result.action_type,
         )
 
-    raw = {
-        "id": getattr(tc, "id", ""),
-        "name": getattr(tc.function, "name", ""),
-        "arguments": getattr(tc.function, "arguments", ""),
-    }
-    return content, raw, result.action_type, result.action_data
+    return content, primary_raw, primary_result.action_type, primary_result.action_data, extra_actions
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -389,8 +442,10 @@ class AIConcierge:
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
-        # 8. Parse: content + opt action
-        content, tool_call_raw, action_type, action_data = _parse_completion(
+        # 8. Parse: content + opt action(s).
+        # v0.7.2 (DRF-678): _parse_completion now returns an extra
+        # `extra_actions` slot for parallel tool_calls beyond the primary.
+        content, tool_call_raw, action_type, action_data, extra_actions = _parse_completion(
             completion, specialist_context,
             master_resolver=master_resolver,
             service_resolver=service_resolver,
@@ -429,4 +484,5 @@ class AIConcierge:
             content=content,
             action_type=action_type,
             action_data=action_data,
+            extra_actions=extra_actions,
         )

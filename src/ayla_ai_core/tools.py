@@ -18,6 +18,8 @@ DRF-238 (LLM trained behavior + бот в проде уже эмиттит эт�
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, Literal
 
 __all__ = [
@@ -207,21 +209,34 @@ def build_tool_definitions(id_schema_type: IdSchemaType = "integer") -> list[dic
 # Default tool definitions — int IDs. Бот / legacy callers могут импортировать
 # напрямую `from ayla_ai_core import TOOL_DEFINITIONS`. Ayla / multi-tenant
 # консумеры используют `build_tool_definitions("string")`.
-TOOL_DEFINITIONS = build_tool_definitions("integer")
+#
+# v0.7.2 (DRF-679): module-level constant — read-only. Wrapped via
+# `MappingProxyType` + outer `tuple` so consumer mutation
+# (`TOOL_DEFINITIONS[0]["x"] = "y"` or `TOOL_DEFINITIONS.append(...)`) raises
+# at the top level. Callers that need a mutable copy use
+# `build_tool_definitions(...)` — it returns a fresh `list[dict]` per call.
+#
+# Note: shallow immutability only — `TOOL_DEFINITIONS[0]["function"]["x"] = …`
+# still works because nested dicts are not wrapped. Deeper immutability
+# would change the signature of consumer code that legitimately reads
+# `tool["function"]["parameters"]` — defer to a future minor.
+TOOL_DEFINITIONS: tuple[Mapping[str, Any], ...] = tuple(
+    MappingProxyType(d) for d in build_tool_definitions("integer")
+)
 
-SHOW_MASTERS = TOOL_DEFINITIONS[0]
+SHOW_MASTERS: Mapping[str, Any] = TOOL_DEFINITIONS[0]
 """DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
-SHOW_SLOTS = TOOL_DEFINITIONS[1]
+SHOW_SLOTS: Mapping[str, Any] = TOOL_DEFINITIONS[1]
 """DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
-CONFIRM_BOOKING = TOOL_DEFINITIONS[2]
+CONFIRM_BOOKING: Mapping[str, Any] = TOOL_DEFINITIONS[2]
 """DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
-SHOW_MY_BOOKINGS = TOOL_DEFINITIONS[3]
+SHOW_MY_BOOKINGS: Mapping[str, Any] = TOOL_DEFINITIONS[3]
 """DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
-ASK_CLARIFICATION = TOOL_DEFINITIONS[4]
+ASK_CLARIFICATION: Mapping[str, Any] = TOOL_DEFINITIONS[4]
 """DEPRECATED: используй build_tool_definitions(...). Alias для backward compat."""
 
 

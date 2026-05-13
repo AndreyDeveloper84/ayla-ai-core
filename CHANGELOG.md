@@ -11,6 +11,89 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-05-13
+
+Performance + security hardening from the 6-agent v0.6.0 review. v0.7.1
+is reserved as the rapid-response slot for bugs surfaced by ai-bot-platform
+Sprint 7 adoption; if it stays empty, that's a good outcome — skip
+straight to v0.7.2 in any downstream pin.
+
+### BREAKING (soft)
+
+- **`tool_handlers.handle_confirm_booking` resolvers MUST include `tenant_id`
+  in their returned dict** (DRF-680 / Sec-1). v0.7.0 was permissive: a
+  resolver that returned `{"name": "Anna"}` silently bypassed the cross-
+  tenant guard. v0.7.2 returns `ASK_CLARIFICATION` with reason
+  `{master|service}_resolver_no_tenant_id` when `tenant_id` is missing,
+  and `{master|service}_tenant_mismatch` (unchanged) when it differs.
+  **Migration**: add `tenant_id` to your resolver's row dict. If you
+  genuinely can't (legacy wrapper), set
+  `my_resolver.__resolver_skips_tenant_check__ = True` — a `WARNING`
+  is emitted per call so the bypass stays visible in audit logs.
+
+### Performance
+
+- **O(1) handler lookups** (DRF-677 / Perf-1): `SpecialistContext` gains
+  `by_id: dict[ID_T, SpecialistCandidate[ID_T]]` and each
+  `SpecialistCandidate` gains `service_id_set: frozenset[ID_T]`. Both
+  pre-computed by `build_specialist_context_from_candidates`. Eliminates
+  per-call linear scans + set-rebuild that breached the per-turn budget
+  at N=1000 (SaaS catalog scale). Backward-compat: `__post_init__`
+  auto-populates these fields if a caller constructs `SpecialistContext`
+  / `SpecialistCandidate` directly and omits them — no signature break.
+- **Parallel `tool_calls` support** (DRF-678 / Perf-2): `orchestrator`
+  now dispatches **every** entry in `completion.choices[0].message.tool_calls`
+  instead of silently dropping calls beyond `[0]`. gpt-4o emits 2-3
+  parallel calls by default; v0.7.0 was discarding production data.
+  Merge strategy: "first non-clarification wins" for the primary action
+  in `ChatResponseDTO`; remaining results return in a new optional
+  `extra_actions: list[{"action_type": str, "action_data": dict}] | None`
+  field (`None` for 0/1 tool_calls — fully backward-compatible).
+
+### Security
+
+- **Stricter cross-tenant guard** (DRF-680) — see BREAKING above.
+
+### Defensive
+
+- **`TOOL_DEFINITIONS` is now read-only** (DRF-679 / Perf-3): wrapped via
+  `types.MappingProxyType` + outer `tuple`. Mutation attempts
+  (`TOOL_DEFINITIONS[0]["x"] = "y"` or `.append(...)`) now raise at the
+  top level. `SHOW_MASTERS` / `SHOW_SLOTS` / `CONFIRM_BOOKING` /
+  `SHOW_MY_BOOKINGS` / `ASK_CLARIFICATION` aliases inherit the wrap
+  (they alias into the tuple). The factory `build_tool_definitions(...)`
+  is unchanged — still returns a fresh mutable `list[dict]` per call;
+  callers needing mutation switch to it. Note: shallow immutability only;
+  nested dicts (`tool["function"]["parameters"]`) remain mutable — left
+  for a future minor.
+
+### Internal
+
+- `_parse_completion` return tuple grows by one slot (extra_actions).
+  Private API, only `AIConcierge.send_message` consumes it.
+
+### Migration cookbook
+
+```python
+# Before (v0.7.0):
+def my_master_resolver(master_id, *, tenant_id):
+    row = Master.objects.filter(id=master_id, tenant_id=tenant_id).first()
+    if row is None:
+        return None
+    return {"name": row.name, "price_from": row.price_from}
+
+# After (v0.7.2 — add tenant_id):
+def my_master_resolver(master_id, *, tenant_id):
+    row = Master.objects.filter(id=master_id, tenant_id=tenant_id).first()
+    if row is None:
+        return None
+    return {
+        "name": row.name,
+        "price_from": row.price_from,
+        "tenant_id": row.tenant_id,   # <-- v0.7.2 required (or opt-out attribute)
+    }
+```
+
 ## [0.7.0] — 2026-05-13
 
 ### BREAKING

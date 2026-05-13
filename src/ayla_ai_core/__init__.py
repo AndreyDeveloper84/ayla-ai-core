@@ -79,7 +79,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.7.0"
+__version__ = "0.7.2"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
