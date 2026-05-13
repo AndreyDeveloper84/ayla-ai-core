@@ -121,6 +121,15 @@ class ChatResponseDTO:
     action_type: str | None
     action_data: dict[str, Any] | None
     extra_actions: list[dict[str, Any]] | None = None
+    # NEW in v0.7.3 (DRF-682): telemetry surfaced as data, not just in logs.
+    # All five default to a neutral zero/empty so v0.7.2 constructor sites
+    # (positional or partial-kwarg) keep compiling — only consumers that
+    # opt into reading them see the measured values.
+    latency_ms: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    model: str = ""
+    provider: str = ""
 
 
 @runtime_checkable
@@ -495,4 +504,12 @@ class AIConcierge:
                 action_type=action_type,
                 action_data=action_data,
                 extra_actions=extra_actions,
+                # v0.7.3 (DRF-682): surface telemetry as DTO fields so
+                # consumers can build dashboards from return values
+                # (instead of grepping log strings).
+                latency_ms=latency_ms,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                model=self._model_name,
+                provider="openai",  # v0.8.0 will multiplex via L-track router
             )

@@ -974,3 +974,95 @@ class TestParallelToolCalls:
         assert extras is not None
         assert len(extras) == 1
         assert extras[0]["action_type"] == "ask_clarification"
+
+
+# ─── DRF-682 (v0.7.3 / Obs-2): telemetry on ChatResponseDTO ───────────────
+
+
+class TestChatResponseDTOTelemetry:
+    """v0.7.3: latency/tokens/model/provider returned as DTO fields, not
+    only logged. Consumers build dashboards from the return value.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tokens_and_model_populated_for_plain_text(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        client = MockOpenAIClient(MockCompletion(
+            content="Привет.", tokens_in=123, tokens_out=45,
+        ))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+            model_name="gpt-4o-test",
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="hi",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.tokens_in == 123
+        assert result.tokens_out == 45
+        assert result.model == "gpt-4o-test"
+        assert result.provider == "openai"
+
+    @pytest.mark.asyncio
+    async def test_latency_ms_non_negative(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        """Real value, not zero — confirms the field actually flowed through
+        from the time.monotonic() measurement, not the default."""
+        client = MockOpenAIClient(MockCompletion(content="ok"))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="hi",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.latency_ms >= 0
+
+    @pytest.mark.asyncio
+    async def test_telemetry_populated_for_tool_call_response(
+        self, store, master_context, user_key, prompt_renderer,
+    ) -> None:
+        """tool_call path also propagates telemetry — measurement happens
+        before _parse_completion branches on the message shape."""
+        client = MockOpenAIClient(MockCompletion(
+            tool_call_name="show_masters",
+            tool_call_args={"master_ids": [1], "explanation": "x"},
+            tokens_in=200, tokens_out=80,
+        ))
+        concierge = AIConcierge(
+            openai_client=client, store=store,
+            context_builder=lambda: master_context,
+            model_name="gpt-4o-mini",
+        )
+        result = await concierge.send_message(
+            user_key=user_key,
+            message_text="who?",
+            prompt_renderer=prompt_renderer,
+        )
+        assert result.action_type == "show_masters"
+        assert result.tokens_in == 200
+        assert result.tokens_out == 80
+        assert result.model == "gpt-4o-mini"
+        assert result.provider == "openai"
+
+    def test_dto_default_field_values_keep_v072_constructor_compat(self) -> None:
+        """v0.7.2 callers constructing ChatResponseDTO with the old field
+        set must keep compiling — new fields default to zero/empty."""
+        dto = ChatResponseDTO(
+            conversation_id=42,
+            content="hello",
+            action_type=None,
+            action_data=None,
+        )
+        # Old fields populated, new ones defaulted (no crash).
+        assert dto.latency_ms == 0
+        assert dto.tokens_in == 0
+        assert dto.tokens_out == 0
+        assert dto.model == ""
+        assert dto.provider == ""
