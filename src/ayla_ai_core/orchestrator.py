@@ -45,6 +45,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from asgiref.sync import sync_to_async
@@ -52,6 +53,7 @@ from asgiref.sync import sync_to_async
 from ayla_ai_core.context import SpecialistContext
 from ayla_ai_core.observability import (
     current_tenant_id,
+    scope_frozen_now,
     scope_tenant_id,
 )
 from ayla_ai_core.tool_handlers import (
@@ -387,6 +389,7 @@ class AIConcierge:
         prompt_renderer: Callable[[SpecialistContext[Any]], str],
         master_resolver: MasterResolver | None = None,
         service_resolver: ServiceResolver | None = None,
+        frozen_now: datetime | None = None,
     ) -> ChatResponseDTO:
         """Один turn AI Concierge: user message → assistant response с opt action.
 
@@ -433,7 +436,12 @@ class AIConcierge:
         # v0.7.3 (DRF-681): bind tenant_id to the ContextVar so every log
         # record emitted by ayla — including from tool_handlers helpers that
         # don't take context as a param — carries the field automatically.
-        async with scope_tenant_id(specialist_context.tenant_id):
+        # v0.7.3 (DRF-683): also bind frozen_now (or None) so prompt
+        # renderers + history filters can read the replay clock.
+        async with (
+            scope_tenant_id(specialist_context.tenant_id),
+            scope_frozen_now(frozen_now),
+        ):
             # 4. Load recent history
             history = await self._load_history(
                 conversation,

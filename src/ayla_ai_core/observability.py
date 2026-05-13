@@ -44,14 +44,31 @@ from __future__ import annotations
 
 import contextvars
 import logging
+from datetime import datetime
 
 __all__ = [
+    "ReplayDeterminismError",
     "TenantContextFilter",
+    "current_frozen_now",
     "current_tenant_id",
     "reset_tenant_id",
+    "scope_frozen_now",
     "scope_tenant_id",
     "set_tenant_id",
 ]
+
+
+class ReplayDeterminismError(RuntimeError):
+    """Raised by replay harnesses (or custom dispatchers) when an operation
+    that would introduce non-determinism is attempted under a frozen-clock
+    scope.
+
+    v0.7.3 ships the class so consumers can flag violations consistently;
+    the library itself never raises it from default code paths. Wire it
+    from your custom :class:`ToolDispatcher` if it touches ``random``,
+    wall-clock, or any other source of variability that breaks
+    byte-identical replay.
+    """
 
 
 # The default empty string is deliberate. None would force every consumer
@@ -131,6 +148,63 @@ def scope_tenant_id(value: str) -> _Scope:
             result = dispatch_tool_call(...)
     """
     return _Scope(value)
+
+
+# Frozen clock (v0.7.3 / Obs-3 / DRF-683). When bound, all wall-clock-
+# adjacent operations in the library should read from this value instead
+# of ``datetime.utcnow()`` / ``date.today()`` — byte-identical replay
+# requires the same "now" across runs. ai-bot-platform's adapter A3 does
+# the same thing at the consumer layer; v0.7.3 makes the contract usable
+# by any ayla consumer without an adapter.
+_frozen_now_var: contextvars.ContextVar[datetime | None] = contextvars.ContextVar(
+    "ayla_ai_core.frozen_now", default=None
+)
+
+
+def current_frozen_now() -> datetime | None:
+    """Return the frozen ``now`` bound to the current execution context.
+
+    ``None`` means "no replay scope active" — production callers fall
+    back to the wall clock. Library renderers and history filters should
+    branch on this value rather than calling :meth:`datetime.utcnow` /
+    :meth:`date.today` directly.
+    """
+    return _frozen_now_var.get()
+
+
+class _FrozenNowScope:
+    """Sync + async context manager for the frozen clock."""
+
+    __slots__ = ("_token", "_value")
+
+    def __init__(self, value: datetime | None) -> None:
+        self._value = value
+        self._token: contextvars.Token[datetime | None] | None = None
+
+    def __enter__(self) -> datetime | None:
+        self._token = _frozen_now_var.set(self._value)
+        return self._value
+
+    def __exit__(self, *_exc: object) -> None:
+        assert self._token is not None
+        _frozen_now_var.reset(self._token)
+        self._token = None
+
+    async def __aenter__(self) -> datetime | None:
+        return self.__enter__()
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.__exit__(*_exc)
+
+
+def scope_frozen_now(value: datetime | None) -> _FrozenNowScope:
+    """Bind ``frozen_now`` for the duration of a ``with``/``async with`` block.
+
+    Pass ``None`` to enter a scope that explicitly clears any outer frozen
+    clock (useful when nested under a replay scope but a sub-step needs
+    real time).
+    """
+    return _FrozenNowScope(value)
 
 
 class TenantContextFilter(logging.Filter):
