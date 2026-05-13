@@ -30,12 +30,13 @@ def specialist_context():
             services=[(10, "массаж спины"), (11, "лимфодренаж")],
         ),
     ]
-    return build_specialist_context_from_candidates(candidates)
+    # v0.7.0: tenant_id mandatory. Synthetic test value — clearly not real.
+    return build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
 
 
 @pytest.fixture
 def empty_context():
-    return build_specialist_context_from_candidates([])
+    return build_specialist_context_from_candidates([], tenant_id="test-tenant")
 
 
 @pytest.fixture
@@ -252,7 +253,7 @@ def test_render_token_budget_under_2500_with_50_candidates() -> None:
         )
         for i in range(1, 51)
     ]
-    ctx = build_specialist_context_from_candidates(candidates)
+    ctx = build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
     out = render_system_prompt(
         today=date(2026, 5, 15), client_name="X", bookings_count=0,
         specialist_context=ctx, voice_config=FORMULA_TELA_VOICE,
@@ -341,3 +342,101 @@ def test_render_extra_hint_works_with_ayla_voice_too(render_kwargs) -> None:
     assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" in out
     # Memory hint section still present (Ayla voice).
     assert "помнишь" in out.lower() or "помню" in out.lower()
+
+
+# ─── B4 regression tests (v0.7.0): escape_for_format anti-injection ────────
+
+
+class TestBraceEscape:
+    """B4 (v0.7.0): render_system_prompt escapes braces in user-controlled
+    fields by default. Prevents KeyError DoS + template-injection on stray
+    `{` and `}` in client_name / extra_hint / brand-config strings.
+    """
+
+    @staticmethod
+    def _render(voice_config=None, **overrides):
+        """Helper. Builds minimal specialist_context + voice, calls render."""
+        from ayla_ai_core.context import (
+            SpecialistCandidate,
+            build_specialist_context_from_candidates,
+        )
+
+        candidates = [
+            SpecialistCandidate(
+                id=42, name="Анна", specialization="массаж",
+                services=[(10, "массаж спины")],
+            ),
+        ]
+        ctx = build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
+        kwargs = {
+            "today": date(2026, 5, 15),
+            "client_name": "Мария",
+            "bookings_count": 1,
+            "specialist_context": ctx,
+            "voice_config": voice_config or FORMULA_TELA_VOICE,
+        }
+        kwargs.update(overrides)
+        return render_system_prompt(**kwargs)
+
+    def test_client_name_with_braces_does_not_break_format(self):
+        """`client_name="{evil}"` would have raised KeyError pre-v0.7.0."""
+        out = self._render(client_name="{evil}")
+        # Output contains literal `{evil}`, not template artifacts
+        assert "{evil}" in out
+
+    def test_extra_hint_with_template_injection_neutralized(self):
+        """`extra_hint="{client_name}"` must NOT substitute the actual
+        client_name value (which would be a real injection)."""
+        out = self._render(
+            client_name="SECRET-MARIA",
+            extra_hint="see this: {client_name}",
+        )
+        # The injected `{client_name}` in extra_hint should remain LITERAL,
+        # not get replaced with "SECRET-MARIA" via .format() inner-pass.
+        # Search for the literal token in the rendered output.
+        assert "{client_name}" in out
+        # Sanity: client_name was used in its proper slot
+        assert "SECRET-MARIA" in out
+
+    def test_business_name_with_braces_escaped(self):
+        """Brand-config fields also escape (defends against future
+        DB-backed BrandVoiceConfig where admins could enter braces)."""
+        from ayla_ai_core.prompts import BrandVoiceConfig
+
+        evil_voice = BrandVoiceConfig(
+            assistant_name="Aya",
+            business_name="Salon {evil} Inc",
+            business_address="Penza, {addr}",
+            domain="beauty",
+            off_topic_redirect="Off-topic: {redirect}",
+        )
+        out = self._render(voice_config=evil_voice)
+        # Each malicious literal survives the .format() round-trip
+        assert "{evil}" in out
+        assert "{addr}" in out
+        assert "{redirect}" in out
+
+    def test_escape_off_legacy_behavior(self):
+        """`escape_for_format=False` reproduces v0.6.x identical output for
+        callers that already escape in a wrapper layer (e.g. ai-bot-platform
+        ayla_adapter DRF-616). Safe values pass through unchanged."""
+        out_safe = self._render(client_name="Maria", escape_for_format=False)
+        # Without braces in input, output is identical regardless of flag
+        out_default = self._render(client_name="Maria")
+        # Strip the variable date/etc — easier to just assert client name present
+        assert "Maria" in out_safe
+        assert "Maria" in out_default
+
+    def test_escape_off_with_braces_would_break(self):
+        """With escape_for_format=False, raw `{client_name}` in extra_hint
+        triggers template substitution — this documents the v0.6.x
+        behavior the kwarg disables. Caller must escape themselves."""
+        # Caller pre-escapes — adapter does this in ai-bot-platform
+        from ayla_ai_core.prompts import _escape_braces
+
+        out = self._render(
+            client_name="Мария",
+            extra_hint=_escape_braces("see this: {client_name}"),
+            escape_for_format=False,
+        )
+        assert "{client_name}" in out

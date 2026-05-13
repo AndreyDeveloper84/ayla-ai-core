@@ -46,7 +46,8 @@ def master_context():
             services=[(12, "СПА")],
         ),
     ]
-    return build_master_context_from_candidates(candidates)
+    # v0.7.0: tenant_id mandatory. Synthetic test value — clearly not real.
+    return build_master_context_from_candidates(candidates, tenant_id="test-tenant")
 
 
 def _make_tool_call(name: str, arguments: str, tc_id: str = "tc_1"):
@@ -117,6 +118,75 @@ class TestShowMasters:
         # True → _safe_int returns None → отфильтрован → все невалидны → fallback
         assert result.action_type == ActionType.ASK_CLARIFICATION
 
+    # ─── B2 regression tests (v0.7.0) ──────────────────────────────────────
+
+    def test_scores_reasons_aligned_after_hallucinated_id_filter(
+        self, master_context
+    ) -> None:
+        """B2 (v0.7.0): when the LLM emits a mix of valid + hallucinated IDs,
+        surviving masters must receive the score/reason the model assigned
+        at the SAME original index — not the post-filter index.
+
+        Pre-fix: master_ids=[999, 1, 998, 2] + scores=[10, 90, 20, 75]
+        → master 1 got score=10 (wrong — that was meant for hallucinated 999).
+        Post-fix: master 1 gets score=90, master 2 gets score=75.
+        """
+        args = {
+            "master_ids": [999, 1, 998, 2],
+            "match_scores": [10, 90, 20, 75],
+            "match_reasons": [["bad1"], ["good1"], ["bad2"], ["good2"]],
+            "explanation": "x",
+        }
+        result = handle_show_masters(args, master_context)
+        assert result.action_type == ActionType.SHOW_MASTERS
+        masters = result.action_data["masters"]
+        assert len(masters) == 2
+
+        # Order preserved by original emission order — first surviving was id=1.
+        m1, m2 = masters
+        assert m1["master"]["id"] == 1
+        assert m1["match_score"] == 90
+        assert m1["match_reasons"] == ["good1"]
+        assert m2["master"]["id"] == 2
+        assert m2["match_score"] == 75
+        assert m2["match_reasons"] == ["good2"]
+
+    def test_duplicate_master_ids_deduped(self, master_context) -> None:
+        """B2 (v0.7.0): LLM occasionally repeats the same id; render once."""
+        args = {
+            "master_ids": [1, 1, 1],
+            "match_scores": [90, 80, 70],
+            "match_reasons": [["a"], ["b"], ["c"]],
+            "explanation": "x",
+        }
+        result = handle_show_masters(args, master_context)
+        masters = result.action_data["masters"]
+        assert len(masters) == 1
+        assert masters[0]["master"]["id"] == 1
+        # First emission wins (orig_idx=0) for score/reason.
+        assert masters[0]["match_score"] == 90
+        assert masters[0]["match_reasons"] == ["a"]
+
+    def test_alignment_when_scores_array_short(self, master_context) -> None:
+        """Fewer scores than ids → surviving masters whose orig_idx exceeds
+        scores length get None (graceful)."""
+        args = {
+            "master_ids": [999, 1, 2],
+            "match_scores": [10, 90],  # only 2 entries; idx=2 → None
+            "match_reasons": [["bad"], ["good1"]],
+            "explanation": "x",
+        }
+        result = handle_show_masters(args, master_context)
+        masters = result.action_data["masters"]
+        assert len(masters) == 2
+        # master id=1 at orig_idx=1 → score=90
+        assert masters[0]["master"]["id"] == 1
+        assert masters[0]["match_score"] == 90
+        # master id=2 at orig_idx=2 → score absent in array → None
+        assert masters[1]["master"]["id"] == 2
+        assert masters[1]["match_score"] is None
+        assert masters[1]["match_reasons"] == []
+
 
 # ─── handle_show_slots ────────────────────────────────────────────────────
 
@@ -170,8 +240,8 @@ class TestConfirmBooking:
         assert result.action_data["service_name"] is None
 
     def test_with_resolvers_enriches_action_data(self, master_context) -> None:
-        master_resolver = lambda mid: {"name": "Анна Иванова"} if mid == 1 else None
-        service_resolver = lambda sid: {
+        master_resolver = lambda mid, **_: {"name": "Анна Иванова"} if mid == 1 else None
+        service_resolver = lambda sid, **_: {
             "name": "массаж спины", "price_from": "2500", "duration_min": 60,
         } if sid == 10 else None
 
@@ -198,7 +268,7 @@ class TestConfirmBooking:
         }
         result = handle_confirm_booking(
             args, master_context,
-            master_resolver=lambda mid: None,
+            master_resolver=lambda mid, **_: None,
         )
         assert result.action_type == ActionType.ASK_CLARIFICATION
 
@@ -239,8 +309,8 @@ class TestConfirmBooking:
         """
         from decimal import Decimal
 
-        master_resolver = lambda mid: {"name": "Анна"} if mid == 1 else None
-        service_resolver = lambda sid: {
+        master_resolver = lambda mid, **_: {"name": "Анна"} if mid == 1 else None
+        service_resolver = lambda sid, **_: {
             "name": "массаж", "price_from": Decimal("2500.00"), "duration_min": 60,
         } if sid == 10 else None
 
@@ -260,8 +330,8 @@ class TestConfirmBooking:
 
     def test_price_from_none_stays_none(self, master_context) -> None:
         """None должен остаться None (не "None" строкой)."""
-        master_resolver = lambda mid: {"name": "Анна"}
-        service_resolver = lambda sid: {
+        master_resolver = lambda mid, **_: {"name": "Анна"}
+        service_resolver = lambda sid, **_: {
             "name": "массаж", "price_from": None, "duration_min": 60,
         }
         args = {
@@ -283,7 +353,7 @@ class TestConfirmBooking:
         }
         result = handle_confirm_booking(
             args, master_context,
-            master_resolver=lambda mid: None,
+            master_resolver=lambda mid, **_: None,
         )
         assert result.action_type == ActionType.ASK_CLARIFICATION
         assert "недоступен" in result.action_data["question"]
@@ -385,7 +455,7 @@ class TestDispatch:
 
     def test_confirm_booking_passes_resolvers_through_dispatch(self, master_context) -> None:
         """dispatch_tool_call forwards resolvers to handle_confirm_booking."""
-        master_resolver = lambda mid: {"name": "X"} if mid == 1 else None
+        master_resolver = lambda mid, **_: {"name": "X"} if mid == 1 else None
         tc = _make_tool_call(
             "confirm_booking",
             '{"master_id": 1, "service_id": 10, "datetime": "2026-05-15T14:00:00+03:00"}',
@@ -523,3 +593,118 @@ def test_handlers_id_parser_default_is_safe_int(master_context) -> None:
     result = handle_show_masters(args, master_context)
     assert result.action_type == ActionType.SHOW_MASTERS
     assert len(result.action_data["masters"]) == 2
+
+
+# ─── B3 regression tests (v0.7.0): mandatory tenant_id enforcement ─────────
+
+
+class TestTenantScoping:
+    """B3 (v0.7.0): tenant_id is required on SpecialistContext. dispatch +
+    all handlers refuse to operate on an empty/missing tenant_id. Resolvers
+    receive tenant_id as kwarg-only argument; mismatch between context and
+    resolver-returned `tenant_id` triggers fallback clarification.
+    """
+
+    @staticmethod
+    def _minimal_context(tenant_id: str = ""):
+        """Build a minimal SpecialistContext, optionally with empty tenant."""
+        # Build via direct constructor so we can pass empty/missing tenant
+        # and trigger the assertion. The builder helper rejects empty
+        # at construction time (tested in TestSpecialistContext).
+        from ayla_ai_core.context import SpecialistCandidate, SpecialistContext
+
+        return SpecialistContext(
+            candidates=[
+                SpecialistCandidate(
+                    id=1, name="Анна", specialization="массаж",
+                    services=[(10, "массаж спины")],
+                ),
+            ],
+            candidate_ids=frozenset({1}),
+            candidate_service_ids=frozenset({10}),
+            summary_text="- master_id=1 Анна",
+            tenant_id=tenant_id,
+        )
+
+    def test_context_without_tenant_id_raises(self):
+        """Calling any handler with empty tenant_id → ValueError, fail-loud."""
+        import pytest
+
+        ctx = self._minimal_context(tenant_id="")  # empty string
+        with pytest.raises(ValueError, match="tenant_id required"):
+            handle_show_masters({"master_ids": [1]}, ctx)
+        with pytest.raises(ValueError, match="tenant_id required"):
+            handle_show_slots(
+                {"master_id": 1, "service_id": 10, "date": "2026-05-20"},
+                ctx,
+            )
+        with pytest.raises(ValueError, match="tenant_id required"):
+            handle_confirm_booking(
+                {
+                    "master_id": 1, "service_id": 10,
+                    "datetime": "2026-05-20T14:00:00+03:00",
+                },
+                ctx,
+            )
+
+    def test_resolver_called_with_tenant_id_kwarg(self):
+        """v0.7.0: resolvers receive `tenant_id=` kwarg from dispatch.
+        Allows the resolver to scope its ORM query by tenant."""
+        seen_kwargs: dict = {}
+
+        def master_resolver(value, **kwargs):
+            seen_kwargs.update(kwargs)
+            return {"name": "Анна Иванова"}
+
+        ctx = self._minimal_context(tenant_id="test-tenant")
+        result = handle_confirm_booking(
+            {
+                "master_id": 1, "service_id": 10,
+                "datetime": "2026-05-20T14:00:00+03:00",
+            },
+            ctx,
+            master_resolver=master_resolver,
+        )
+        # Resolver called with kwarg tenant_id matching context
+        assert seen_kwargs.get("tenant_id") == "test-tenant"
+        assert result.action_type == ActionType.CONFIRM_BOOKING
+
+    def test_cross_tenant_master_dropped_to_clarification(self):
+        """Master resolver returns dict with mismatching tenant_id → bounce
+        to ASK_CLARIFICATION (anti cross-tenant leak)."""
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def cross_tenant_resolver(value, **kwargs):
+            # Master row from another tenant accidentally cached/leaked
+            return {"name": "Anna", "tenant_id": "tenant-b"}
+
+        result = handle_confirm_booking(
+            {
+                "master_id": 1, "service_id": 10,
+                "datetime": "2026-05-20T14:00:00+03:00",
+            },
+            ctx,
+            master_resolver=cross_tenant_resolver,
+        )
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+
+    def test_cross_tenant_service_dropped_to_clarification(self):
+        """Same cross-tenant guard fires for service_resolver."""
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def ok_master(value, **kwargs):
+            return {"name": "Anna", "tenant_id": "tenant-a"}
+
+        def cross_tenant_service(value, **kwargs):
+            return {"name": "Massage", "tenant_id": "tenant-b"}
+
+        result = handle_confirm_booking(
+            {
+                "master_id": 1, "service_id": 10,
+                "datetime": "2026-05-20T14:00:00+03:00",
+            },
+            ctx,
+            master_resolver=ok_master,
+            service_resolver=cross_tenant_service,
+        )
+        assert result.action_type == ActionType.ASK_CLARIFICATION

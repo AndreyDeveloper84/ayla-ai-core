@@ -69,16 +69,18 @@ class SpecialistContext[ID_T: (int, UUID, str)]:
     `master_id=N` / `service_id=N` (LLM использует эти ID в tool_call args).
     Wire format остаётся `master_id` для backward compat.
 
-    tenant_id — multi-tenant scope (DRF-238). Optional для single-tenant случаев
-    (бот Формулы тела). Ayla marketplace передаёт tenant_id для каждого
-    запроса — handlers и render могут использовать для branding или filtering.
+    tenant_id — multi-tenant scope. **Required since v0.7.0** (was optional
+    in v0.6.x). Multi-tenant isolation is a security boundary, not a feature
+    flag — defaulting to None silently allowed cross-tenant leakage in
+    consumers that forgot to pass it. Single-tenant consumers pass a stable
+    sentinel (e.g., `"formula-tela"`) to satisfy the contract.
     """
 
     candidates: list[SpecialistCandidate[ID_T]]
     candidate_ids: frozenset[ID_T]
     candidate_service_ids: frozenset[ID_T]
     summary_text: str
-    tenant_id: str | None = None
+    tenant_id: str
 
 
 def render_summary_text[ID_T: (int, UUID, str)](candidates: list[SpecialistCandidate[ID_T]]) -> str:
@@ -117,16 +119,21 @@ def render_summary_text[ID_T: (int, UUID, str)](candidates: list[SpecialistCandi
 def build_specialist_context_from_candidates[ID_T: (int, UUID, str)](
     candidates: list[SpecialistCandidate[ID_T]],
     *,
-    tenant_id: str | None = None,
+    tenant_id: str,
 ) -> SpecialistContext[ID_T]:
     """Helper для consumer-side ORM builders: возьми candidates, получи SpecialistContext.
 
     Бот / Ayla строят `list[SpecialistCandidate[ID_T]]` через свой ORM, потом
     передают сюда — получают frozenset'ы и summary бесплатно.
 
-    tenant_id — optional для multi-tenant (DRF-238). По умолчанию None
-    (single-tenant случай бота).
+    tenant_id — **required since v0.7.0** (was optional kwarg in v0.6.x).
+    Empty string is rejected — multi-tenant scoping is a security boundary
+    and a typo'd empty literal is exactly the regression v0.7.0 closes.
     """
+    if not tenant_id:
+        raise ValueError(
+            "tenant_id is required (v0.7.0); pass a non-empty stable identifier"
+        )
     all_service_ids: set[ID_T] = set()
     for c in candidates:
         all_service_ids.update(sid for sid, _ in c.services)
@@ -152,9 +159,12 @@ MasterContext = SpecialistContext[int]
 
 def build_master_context_from_candidates(
     candidates: list[SpecialistCandidate[int]],
+    *,
+    tenant_id: str,
 ) -> SpecialistContext[int]:
     """DEPRECATED: используй build_specialist_context_from_candidates.
 
-    Backward compat для бота — без tenant_id (single-tenant Формула тела).
+    **v0.7.0**: tenant_id теперь обязательный — single-tenant консумеры
+    передают стабильный sentinel (например, "formula-tela").
     """
-    return build_specialist_context_from_candidates(candidates)
+    return build_specialist_context_from_candidates(candidates, tenant_id=tenant_id)

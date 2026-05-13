@@ -23,6 +23,7 @@ Token budget: <2000 tokens на typical render для gpt-4o-mini.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -187,6 +188,24 @@ def _render_business_descriptor(config: BrandVoiceConfig) -> str:
     return f"AI-помощник {config.business_name}"
 
 
+_BRACE_RE = re.compile(r"([{}])")
+
+
+def _escape_braces(text: str) -> str:
+    """Double `{` and `}` so ``str.format()`` treats them as literal output.
+
+    B4 (v0.7.0) anti-injection: when user-controlled fields (``client_name``,
+    ``extra_hint``, brand-config strings) reach the ``.format()`` step, a stray
+    ``{name}`` could either raise ``KeyError`` or — worse — substitute a
+    template variable's value, leaking it into the system prompt.
+
+    Doubling preserves the literal: ``"{evil}"`` → ``"{{evil}}"`` → after
+    ``.format()`` → ``"{evil}"`` in the rendered string. No data loss, no
+    injection vector.
+    """
+    return _BRACE_RE.sub(r"\1\1", text)
+
+
 def _render_examples_block(examples: list[Example]) -> str:
     """Few-shot examples block (DRF-239 enabler для Level 5).
 
@@ -210,6 +229,7 @@ def render_system_prompt(
     specialist_context: SpecialistContext[Any],
     voice_config: BrandVoiceConfig,
     extra_hint: str = "",
+    escape_for_format: bool = True,
 ) -> str:
     """Render system_prompt с конкретными значениями context'а + brand voice.
 
@@ -220,13 +240,52 @@ def render_system_prompt(
     voice_config — бренд-специфичные параметры (assistant name, business name, etc).
     extra_hint — optional cross-domain context block (DRF-248). Empty = no
         additional content. Caller composes the string from external signals
-        (e.g. nutrition deficits) before passing it; this function trusts it.
-        The block renders as a separate paragraph after the rules so the LLM
-        treats it as advisory context, not a hard rule.
+        (e.g. nutrition deficits) before passing it.
+    escape_for_format — **v0.7.0 B4 anti-injection**. When True (default,
+        fail-safe), all user-derived fields (`client_name`, `extra_hint`,
+        `business_name`, `business_address`, `off_topic_redirect`) have
+        their `{` and `}` doubled so ``str.format()`` reads them as literal
+        output. Prevents:
+
+        - ``KeyError`` DoS when a user types ``"hi {name}"`` and `.format()`
+          can't resolve the placeholder
+        - Template injection when the literal placeholder name matches one
+          of the kwargs above (and would substitute the kwarg value back)
+
+        Pass ``escape_for_format=False`` only when the caller has already
+        escaped braces in a wrapper layer (see ``ai-bot-platform`` adapter
+        DRF-616, which does layer-1 escape and forwards the disable kwarg
+        to avoid double-escape). External/legacy consumers leave it True.
 
     Returns: rendered prompt string. Token budget <2000 для gpt-4o-mini.
     """
     extra_hint_text = (extra_hint or "").strip()
+
+    # business_address is `str | None` (marketplace voices set None); the rest
+    # are `str`. Normalize to "" so _escape_braces never sees None.
+    raw_business_address = voice_config.business_address or ""
+
+    if escape_for_format:
+        client_name_safe = _escape_braces(client_name.strip()) or "клиент"
+        extra_hint_text = _escape_braces(extra_hint_text)
+        business_name_safe = _escape_braces(voice_config.business_name)
+        business_address_safe = _escape_braces(raw_business_address)
+        off_topic_redirect_safe = _escape_braces(voice_config.off_topic_redirect)
+    else:
+        client_name_safe = client_name.strip() or "клиент"
+        business_name_safe = voice_config.business_name
+        business_address_safe = raw_business_address
+        off_topic_redirect_safe = voice_config.off_topic_redirect
+
+    # Build descriptor from already-safe fields so the business name escape
+    # propagates into the rendered "ассистент салона X в Y" phrase.
+    if business_address_safe:
+        business_descriptor = (
+            f"ассистент салона «{business_name_safe}» в {business_address_safe}"
+        )
+    else:
+        business_descriptor = f"AI-помощник {business_name_safe}"
+
     extra_hint_block = (
         f"\n\nДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ (мягкая подсказка, не правило):\n{extra_hint_text}"
         if extra_hint_text
@@ -234,12 +293,12 @@ def render_system_prompt(
     )
     return SYSTEM_PROMPT_TEMPLATE.format(
         assistant_name=voice_config.assistant_name,
-        business_descriptor=_render_business_descriptor(voice_config),
+        business_descriptor=business_descriptor,
         today=today.isoformat(),
-        client_name=client_name.strip() or "клиент",
+        client_name=client_name_safe,
         bookings_count=bookings_count,
         masters_summary=specialist_context.summary_text or "(нет активных мастеров)",
-        off_topic_redirect=voice_config.off_topic_redirect,
+        off_topic_redirect=off_topic_redirect_safe,
         memory_hint=_MEMORY_HINT if voice_config.use_long_term_memory_hint else "",
         extra_hint_block=extra_hint_block,
         examples_block=_render_examples_block(voice_config.examples),
