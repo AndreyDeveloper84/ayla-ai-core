@@ -50,6 +50,10 @@ from typing import Any, Protocol, runtime_checkable
 from asgiref.sync import sync_to_async
 
 from ayla_ai_core.context import SpecialistContext
+from ayla_ai_core.observability import (
+    current_tenant_id,
+    scope_tenant_id,
+)
 from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
@@ -288,6 +292,7 @@ def _parse_completion(
         logger.info(
             "ai_concierge.parallel_tool_calls count=%d primary=%s",
             len(dispatched), primary_result.action_type,
+            extra={"tenant_id": specialist_context.tenant_id},
         )
 
     return content, primary_raw, primary_result.action_type, primary_result.action_data, extra_actions
@@ -416,73 +421,78 @@ class AIConcierge:
                 f"context_builder must return SpecialistContext, got {type(specialist_context)}"
             )
 
-        # 4. Load recent history
-        history = await self._load_history(
-            conversation,
-            exclude_id=getattr(user_msg, "id", None),
-            limit=self._history_limit,
-        )
+        # v0.7.3 (DRF-681): bind tenant_id to the ContextVar so every log
+        # record emitted by ayla — including from tool_handlers helpers that
+        # don't take context as a param — carries the field automatically.
+        async with scope_tenant_id(specialist_context.tenant_id):
+            # 4. Load recent history
+            history = await self._load_history(
+                conversation,
+                exclude_id=getattr(user_msg, "id", None),
+                limit=self._history_limit,
+            )
 
-        # 5. Render system prompt
-        system_prompt = prompt_renderer(specialist_context)
+            # 5. Render system prompt
+            system_prompt = prompt_renderer(specialist_context)
 
-        # 6. Compose for OpenAI
-        llm_messages = _compose_messages(
-            system_prompt=system_prompt,
-            history=history,
-            user_text=message_text,
-        )
+            # 6. Compose for OpenAI
+            llm_messages = _compose_messages(
+                system_prompt=system_prompt,
+                history=history,
+                user_text=message_text,
+            )
 
-        # 7. Call OpenAI с tools
-        started = time.monotonic()
-        completion = await self._openai_client.chat.completions.create(
-            model=self._model_name,
-            messages=llm_messages,
-            tools=self._tool_definitions,
-        )
-        latency_ms = int((time.monotonic() - started) * 1000)
+            # 7. Call OpenAI с tools
+            started = time.monotonic()
+            completion = await self._openai_client.chat.completions.create(
+                model=self._model_name,
+                messages=llm_messages,
+                tools=self._tool_definitions,
+            )
+            latency_ms = int((time.monotonic() - started) * 1000)
 
-        # 8. Parse: content + opt action(s).
-        # v0.7.2 (DRF-678): _parse_completion now returns an extra
-        # `extra_actions` slot for parallel tool_calls beyond the primary.
-        content, tool_call_raw, action_type, action_data, extra_actions = _parse_completion(
-            completion, specialist_context,
-            master_resolver=master_resolver,
-            service_resolver=service_resolver,
-            id_parser=self._id_parser,
-            tool_dispatcher=self._tool_dispatcher,
-        )
+            # 8. Parse: content + opt action(s).
+            # v0.7.2 (DRF-678): _parse_completion now returns an extra
+            # `extra_actions` slot for parallel tool_calls beyond the primary.
+            content, tool_call_raw, action_type, action_data, extra_actions = _parse_completion(
+                completion, specialist_context,
+                master_resolver=master_resolver,
+                service_resolver=service_resolver,
+                id_parser=self._id_parser,
+                tool_dispatcher=self._tool_dispatcher,
+            )
 
-        # 9. Telemetry
-        usage = getattr(completion, "usage", None)
-        tokens_in = getattr(usage, "prompt_tokens", 0) if usage else 0
-        tokens_out = getattr(usage, "completion_tokens", 0) if usage else 0
+            # 9. Telemetry
+            usage = getattr(completion, "usage", None)
+            tokens_in = getattr(usage, "prompt_tokens", 0) if usage else 0
+            tokens_out = getattr(usage, "completion_tokens", 0) if usage else 0
 
-        # 10. Save assistant message
-        await self._save_message(
-            conversation,
-            role=MessageRole.ASSISTANT,
-            content=content,
-            action_type=action_type or "",
-            action_data=action_data,
-            tool_call=tool_call_raw,
-            tool_call_id=(tool_call_raw or {}).get("id", "") if tool_call_raw else "",
-            tokens_in=tokens_in,
-            tokens_out=tokens_out,
-            latency_ms=latency_ms,
-        )
+            # 10. Save assistant message
+            await self._save_message(
+                conversation,
+                role=MessageRole.ASSISTANT,
+                content=content,
+                action_type=action_type or "",
+                action_data=action_data,
+                tool_call=tool_call_raw,
+                tool_call_id=(tool_call_raw or {}).get("id", "") if tool_call_raw else "",
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+            )
 
-        logger.info(
-            "ai_concierge: conv=%s action=%s tokens=%d/%d latency=%dms",
-            getattr(conversation, "id", "?"),
-            action_type or "text",
-            tokens_in, tokens_out, latency_ms,
-        )
+            logger.info(
+                "ai_concierge: conv=%s action=%s tokens=%d/%d latency=%dms",
+                getattr(conversation, "id", "?"),
+                action_type or "text",
+                tokens_in, tokens_out, latency_ms,
+                extra={"tenant_id": current_tenant_id()},
+            )
 
-        return ChatResponseDTO(
-            conversation_id=getattr(conversation, "id", None),
-            content=content,
-            action_type=action_type,
-            action_data=action_data,
-            extra_actions=extra_actions,
-        )
+            return ChatResponseDTO(
+                conversation_id=getattr(conversation, "id", None),
+                content=content,
+                action_type=action_type,
+                action_data=action_data,
+                extra_actions=extra_actions,
+            )

@@ -43,6 +43,7 @@ from typing import Any
 from uuid import UUID
 
 from ayla_ai_core.context import SpecialistContext
+from ayla_ai_core.observability import current_tenant_id
 from ayla_ai_core.tools import ActionType
 
 __all__ = [
@@ -135,7 +136,11 @@ def _fallback_clarification(reason: str, *, question: str = "") -> ToolResult:
     reason — для логов/audit. question — опциональный override (по умолчанию
     общий «уточните»).
     """
-    logger.warning("ai.tool_call.fallback reason=%s", reason)
+    logger.warning(
+        "ai.tool_call.fallback reason=%s",
+        reason,
+        extra={"tenant_id": current_tenant_id()},
+    )
     return ToolResult(
         action_type=ActionType.ASK_CLARIFICATION,
         action_data={
@@ -202,6 +207,7 @@ def _check_resolver_tenant(
             getattr(resolver, "__name__", repr(resolver)),
             resolver_kind,
             expected_tenant_id,
+            extra={"tenant_id": expected_tenant_id},
         )
         return None
 
