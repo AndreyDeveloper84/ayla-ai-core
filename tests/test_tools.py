@@ -135,3 +135,48 @@ def test_default_tool_definitions_constant_is_integer() -> None:
 
     show_masters = next(d for d in TOOL_DEFINITIONS if d["function"]["name"] == "show_masters")
     assert show_masters["function"]["parameters"]["properties"]["master_ids"]["items"]["type"] == "integer"
+
+
+# ─── DRF-679 (v0.7.2 Perf-3): TOOL_DEFINITIONS immutability ───────────────
+
+
+def test_tool_definitions_outer_is_tuple_not_list() -> None:
+    """v0.7.2: outer container is a `tuple` — `.append(...)` must fail."""
+    import pytest
+
+    from ayla_ai_core.tools import TOOL_DEFINITIONS
+
+    assert isinstance(TOOL_DEFINITIONS, tuple)
+    with pytest.raises(AttributeError):
+        TOOL_DEFINITIONS.append({"type": "function"})  # type: ignore[attr-defined]
+
+
+def test_tool_definitions_entries_are_immutable_at_top_level() -> None:
+    """v0.7.2: each tool dict wrapped via MappingProxyType — assignment fails."""
+    import pytest
+
+    from ayla_ai_core.tools import TOOL_DEFINITIONS
+
+    with pytest.raises(TypeError):
+        TOOL_DEFINITIONS[0]["new_field"] = "x"  # type: ignore[index]
+
+
+def test_tool_definitions_deprecated_aliases_also_immutable() -> None:
+    """v0.7.2: SHOW_MASTERS / SHOW_SLOTS / ... share the MappingProxyType wrap."""
+    import pytest
+
+    from ayla_ai_core.tools import SHOW_MASTERS
+
+    with pytest.raises(TypeError):
+        SHOW_MASTERS["new_field"] = "x"  # type: ignore[index]
+
+
+def test_build_tool_definitions_still_returns_mutable_list() -> None:
+    """v0.7.2: factory must return a fresh mutable list (unchanged API)."""
+    from ayla_ai_core.tools import build_tool_definitions
+
+    defs = build_tool_definitions()
+    assert isinstance(defs, list)
+    # Mutation works on the factory return — only the module constant is frozen.
+    defs[0]["function"]["name"] = "MUTATED"
+    assert defs[0]["function"]["name"] == "MUTATED"
