@@ -11,11 +11,18 @@
 """
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
-from ayla_ai_core.context import MasterCandidate, build_master_context_from_candidates
+from ayla_ai_core.context import (
+    MasterCandidate,
+    SpecialistCandidate,
+    SpecialistContext,
+    build_master_context_from_candidates,
+    build_specialist_context_from_candidates,
+)
 from ayla_ai_core.tool_handlers import (
     ToolResult,
     dispatch_tool_call,
@@ -240,10 +247,19 @@ class TestConfirmBooking:
         assert result.action_data["service_name"] is None
 
     def test_with_resolvers_enriches_action_data(self, master_context) -> None:
-        master_resolver = lambda mid, **_: {"name": "Анна Иванова"} if mid == 1 else None
-        service_resolver = lambda sid, **_: {
-            "name": "массаж спины", "price_from": "2500", "duration_min": 60,
-        } if sid == 10 else None
+        master_resolver = lambda mid, **_: (
+            {"name": "Анна Иванова", "tenant_id": "test-tenant"} if mid == 1 else None
+        )
+        service_resolver = lambda sid, **_: (
+            {
+                "name": "массаж спины",
+                "price_from": "2500",
+                "duration_min": 60,
+                "tenant_id": "test-tenant",
+            }
+            if sid == 10
+            else None
+        )
 
         args = {
             "master_id": 1, "service_id": 10,
@@ -309,10 +325,19 @@ class TestConfirmBooking:
         """
         from decimal import Decimal
 
-        master_resolver = lambda mid, **_: {"name": "Анна"} if mid == 1 else None
-        service_resolver = lambda sid, **_: {
-            "name": "массаж", "price_from": Decimal("2500.00"), "duration_min": 60,
-        } if sid == 10 else None
+        master_resolver = lambda mid, **_: (
+            {"name": "Анна", "tenant_id": "test-tenant"} if mid == 1 else None
+        )
+        service_resolver = lambda sid, **_: (
+            {
+                "name": "массаж",
+                "price_from": Decimal("2500.00"),
+                "duration_min": 60,
+                "tenant_id": "test-tenant",
+            }
+            if sid == 10
+            else None
+        )
 
         args = {
             "master_id": 1, "service_id": 10,
@@ -330,9 +355,12 @@ class TestConfirmBooking:
 
     def test_price_from_none_stays_none(self, master_context) -> None:
         """None должен остаться None (не "None" строкой)."""
-        master_resolver = lambda mid, **_: {"name": "Анна"}
+        master_resolver = lambda mid, **_: {"name": "Анна", "tenant_id": "test-tenant"}
         service_resolver = lambda sid, **_: {
-            "name": "массаж", "price_from": None, "duration_min": 60,
+            "name": "массаж",
+            "price_from": None,
+            "duration_min": 60,
+            "tenant_id": "test-tenant",
         }
         args = {
             "master_id": 1, "service_id": 10,
@@ -455,7 +483,9 @@ class TestDispatch:
 
     def test_confirm_booking_passes_resolvers_through_dispatch(self, master_context) -> None:
         """dispatch_tool_call forwards resolvers to handle_confirm_booking."""
-        master_resolver = lambda mid, **_: {"name": "X"} if mid == 1 else None
+        master_resolver = lambda mid, **_: (
+            {"name": "X", "tenant_id": "test-tenant"} if mid == 1 else None
+        )
         tc = _make_tool_call(
             "confirm_booking",
             '{"master_id": 1, "service_id": 10, "datetime": "2026-05-15T14:00:00+03:00"}',
@@ -654,7 +684,7 @@ class TestTenantScoping:
 
         def master_resolver(value, **kwargs):
             seen_kwargs.update(kwargs)
-            return {"name": "Анна Иванова"}
+            return {"name": "Анна Иванова", "tenant_id": "test-tenant"}
 
         ctx = self._minimal_context(tenant_id="test-tenant")
         result = handle_confirm_booking(
@@ -708,3 +738,134 @@ class TestTenantScoping:
             service_resolver=cross_tenant_service,
         )
         assert result.action_type == ActionType.ASK_CLARIFICATION
+
+
+# ─── DRF-680 (v0.7.2 Sec-1): strict cross-tenant guard ────────────────────
+
+
+class TestStrictCrossTenantGuard:
+    """v0.7.2 Sec-1: resolver result MUST include tenant_id; missing -> fallback.
+
+    Soft-breaking from v0.7.0 (where missing tenant_id was permissive).
+    Opt-out per resolver via __resolver_skips_tenant_check__ = True.
+    """
+
+    def _minimal_context(self, *, tenant_id: str) -> SpecialistContext[int]:
+        candidates = [
+            SpecialistCandidate(
+                id=1, name="Anna",
+                specialization="Massage",
+                services=[(10, "Back massage")],
+            ),
+        ]
+        return build_specialist_context_from_candidates(
+            candidates, tenant_id=tenant_id,
+        )
+
+    def test_master_resolver_missing_tenant_id_falls_back(self, caplog):
+        """v0.7.2: resolver returning dict without tenant_id -> ASK_CLARIFICATION.
+
+        Reason tag exposed in audit log so ops can find the misconfigured
+        resolver. v0.7.0 silently allowed this — covered cross-tenant leaks
+        when the resolver wasn't actually scoped at the ORM layer.
+        """
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def sloppy_resolver(value, **kwargs):
+            # Forgot to include tenant_id — v0.7.0 would have allowed this.
+            return {"name": "Anna"}
+
+        with caplog.at_level(logging.WARNING, logger="ayla_ai_core.tool_handlers"):
+            result = handle_confirm_booking(
+                {
+                    "master_id": 1, "service_id": 10,
+                    "datetime": "2026-05-20T14:00:00+03:00",
+                },
+                ctx,
+                master_resolver=sloppy_resolver,
+            )
+
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+        assert "master_resolver_no_tenant_id" in caplog.text
+
+    def test_service_resolver_missing_tenant_id_falls_back(self, caplog):
+        """Service-side mirror of the master check."""
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def ok_master(value, **kwargs):
+            return {"name": "Anna", "tenant_id": "tenant-a"}
+
+        def sloppy_service(value, **kwargs):
+            return {"name": "Massage"}
+
+        with caplog.at_level(logging.WARNING, logger="ayla_ai_core.tool_handlers"):
+            result = handle_confirm_booking(
+                {
+                    "master_id": 1, "service_id": 10,
+                    "datetime": "2026-05-20T14:00:00+03:00",
+                },
+                ctx,
+                master_resolver=ok_master,
+                service_resolver=sloppy_service,
+            )
+
+        assert result.action_type == ActionType.ASK_CLARIFICATION
+        assert "service_resolver_no_tenant_id" in caplog.text
+
+    def test_opt_out_attribute_skips_check(self, caplog):
+        """Resolver with `__resolver_skips_tenant_check__ = True` is exempt.
+
+        Used for legacy wrappers that genuinely can't supply tenant_id.
+        Emits a WARNING per call so the opt-out stays visible in audit logs.
+        """
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def legacy_resolver(value, **kwargs):
+            # Pretend this wraps an old ORM helper that returns plain rows.
+            return {"name": "Anna"}
+
+        legacy_resolver.__resolver_skips_tenant_check__ = True  # type: ignore[attr-defined]
+
+        with caplog.at_level(logging.WARNING, logger="ayla_ai_core.tool_handlers"):
+            result = handle_confirm_booking(
+                {
+                    "master_id": 1, "service_id": 10,
+                    "datetime": "2026-05-20T14:00:00+03:00",
+                },
+                ctx,
+                master_resolver=legacy_resolver,
+            )
+
+        assert result.action_type == ActionType.CONFIRM_BOOKING
+        assert result.action_data["master_name"] == "Anna"
+        assert "resolver_skips_tenant_check" in caplog.text
+        assert "kind=master" in caplog.text
+
+    def test_opt_out_does_not_bypass_tenant_mismatch_when_explicit(self, caplog):
+        """Opt-out short-circuits the WHOLE check — including mismatch.
+
+        Documented escape hatch: caller takes responsibility. The audit log
+        WARNING is the visible signal that this resolver bypasses the guard.
+        """
+        ctx = self._minimal_context(tenant_id="tenant-a")
+
+        def legacy_resolver_with_wrong_tenant(value, **kwargs):
+            return {"name": "Anna", "tenant_id": "tenant-b"}
+
+        legacy_resolver_with_wrong_tenant.__resolver_skips_tenant_check__ = True  # type: ignore[attr-defined]
+
+        with caplog.at_level(logging.WARNING, logger="ayla_ai_core.tool_handlers"):
+            result = handle_confirm_booking(
+                {
+                    "master_id": 1, "service_id": 10,
+                    "datetime": "2026-05-20T14:00:00+03:00",
+                },
+                ctx,
+                master_resolver=legacy_resolver_with_wrong_tenant,
+            )
+
+        # Opt-out means the caller asserted they handle tenant_id themselves.
+        # Result is CONFIRM_BOOKING (not the safer mismatch fallback) —
+        # the WARNING in audit log is the trail.
+        assert result.action_type == ActionType.CONFIRM_BOOKING
+        assert "resolver_skips_tenant_check" in caplog.text
