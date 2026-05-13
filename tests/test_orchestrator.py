@@ -873,7 +873,7 @@ class TestParallelToolCalls:
 
     def test_single_tool_call_extra_actions_is_none(self, master_context):
         """Backward-compat: 1 tool_call -> extra_actions == None (v0.7.0 shape)."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, raw, action_type, _action_data, extras = self._parse(
             master_context,
             [("show_masters", {"master_ids": [1], "explanation": "Лучший"})],
         )
@@ -883,7 +883,7 @@ class TestParallelToolCalls:
 
     def test_double_tool_call_primary_first_non_clarification(self, master_context):
         """2 calls, both concrete -> primary == [0], extras == [1]."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, raw, action_type, _action_data, extras = self._parse(
             master_context,
             [
                 ("show_masters", {"master_ids": [1], "explanation": "Сначала покажу мастеров"}),
@@ -901,7 +901,7 @@ class TestParallelToolCalls:
 
     def test_triple_tool_call_carries_all_extras_in_order(self, master_context):
         """3 calls -> primary first non-clarification, 2 extras in order."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, _raw, action_type, _action_data, extras = self._parse(
             master_context,
             [
                 ("show_masters", {"master_ids": [1], "explanation": "Шаг 1"}),
@@ -925,7 +925,7 @@ class TestParallelToolCalls:
         alongside a show_masters when it's unsure but still has candidates.
         Prior to v0.7.2 the clarification would silently shadow the
         useful action because we only read [0]."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, raw, action_type, _action_data, extras = self._parse(
             master_context,
             [
                 ("ask_clarification", {"question": "Какой день удобнее?"}),
@@ -939,7 +939,7 @@ class TestParallelToolCalls:
 
     def test_all_clarifications_falls_back_to_first(self, master_context):
         """No non-clarification result -> first clarification is the primary."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, raw, action_type, _action_data, extras = self._parse(
             master_context,
             [
                 ("ask_clarification", {"question": "Когда?"}),
@@ -960,7 +960,7 @@ class TestParallelToolCalls:
     ):
         """Tool call with hallucinated id -> ASK_CLARIFICATION; sibling
         valid calls still come through as primary + extras."""
-        content, raw, action_type, action_data, extras = self._parse(
+        _content, _raw, action_type, _action_data, extras = self._parse(
             master_context,
             [
                 ("show_slots", {"master_id": 999, "service_id": 10, "date": "2026-05-20"}),
