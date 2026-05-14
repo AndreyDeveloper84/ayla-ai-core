@@ -23,7 +23,7 @@ from ayla_ai_core.prompts import (
 
 @pytest.fixture
 def specialist_context():
-    """Минимальный SpecialistContext[int] для бота."""
+    """Минимальный SpecialistContext для бота."""
     candidates = [
         SpecialistCandidate(
             id=42, name="Анна Иванова", specialization="массаж",

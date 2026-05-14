@@ -5,7 +5,7 @@
 2. user message сохранён первым, assistant — после
 3. tool_call в response → action_type / action_data заполнены
 4. plain text response → action_type/data = None
-5. context_builder вызывается; результат — обязан быть MasterContext
+5. context_builder вызывается; результат — обязан быть SpecialistContext
 6. system_prompt инжектится в LLM messages первым
 7. history включён в LLM messages (только user/assistant роли)
 8. telemetry: tokens_in/out, latency_ms попадают в save_message
@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ayla_ai_core.context import MasterCandidate, build_master_context_from_candidates
+from ayla_ai_core.context import SpecialistCandidate, build_specialist_context_from_candidates
 from ayla_ai_core.orchestrator import (
     AIConcierge,
     ChatResponseDTO,
@@ -130,13 +130,13 @@ class MockOpenAIClient:
 @pytest.fixture
 def master_context():
     candidates = [
-        MasterCandidate(id=1, name="Анна", specialization="массаж",
+        SpecialistCandidate(id=1, name="Анна", specialization="массаж",
                         services=[(10, "массаж спины")]),
-        MasterCandidate(id=2, name="Борис", specialization="спа",
+        SpecialistCandidate(id=2, name="Борис", specialization="спа",
                         services=[(11, "СПА")]),
     ]
     # v0.7.0: tenant_id mandatory. Synthetic test value — clearly not real.
-    return build_master_context_from_candidates(candidates, tenant_id="test-tenant")
+    return build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
 
 
 @pytest.fixture
@@ -361,7 +361,7 @@ async def test_history_limit_respected(
 async def test_context_builder_must_return_master_context(
     store, user_key, prompt_renderer
 ) -> None:
-    """Defensive: builder вернул не MasterContext → TypeError."""
+    """Defensive: builder вернул не SpecialistContext → TypeError."""
     client = MockOpenAIClient(MockCompletion(content="ок"))
     concierge = AIConcierge(
         openai_client=client, store=store,

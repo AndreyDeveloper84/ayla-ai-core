@@ -7,8 +7,8 @@ import pytest
 
 from ayla_ai_core.composer import PromptComposer
 from ayla_ai_core.context import (
-    MasterCandidate,
-    build_master_context_from_candidates,
+    SpecialistCandidate,
+    build_specialist_context_from_candidates,
 )
 from ayla_ai_core.prompts import (
     FORMULA_TELA_VOICE,
@@ -22,16 +22,16 @@ from ayla_ai_core.prompts import (
 def master_context():
     """Realistic booking context used by FORMULA_TELA in prod."""
     candidates = [
-        MasterCandidate(
+        SpecialistCandidate(
             id=1, name="Анна", specialization="массаж",
             services=[(10, "массаж спины")],
         ),
-        MasterCandidate(
+        SpecialistCandidate(
             id=2, name="Борис", specialization="СПА",
             services=[(11, "СПА процедура")],
         ),
     ]
-    return build_master_context_from_candidates(candidates, tenant_id="formula-tela")
+    return build_specialist_context_from_candidates(candidates, tenant_id="formula-tela")
 
 
 class TestPromptComposerByteIdenticalToLegacy:

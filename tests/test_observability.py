@@ -222,7 +222,7 @@ async def test_send_message_propagates_frozen_now_into_scope() -> None:
     import json
     from types import SimpleNamespace
 
-    from ayla_ai_core.context import MasterCandidate, build_master_context_from_candidates
+    from ayla_ai_core.context import SpecialistCandidate, build_specialist_context_from_candidates
     from ayla_ai_core.orchestrator import AIConcierge
 
     seen_during_render: list[datetime | None] = []
@@ -232,9 +232,9 @@ async def test_send_message_propagates_frozen_now_into_scope() -> None:
         return "system"
 
     candidates = [
-        MasterCandidate(id=1, name="A", specialization="m", services=[(10, "s")]),
+        SpecialistCandidate(id=1, name="A", specialization="m", services=[(10, "s")]),
     ]
-    ctx = build_master_context_from_candidates(candidates, tenant_id="t")
+    ctx = build_specialist_context_from_candidates(candidates, tenant_id="t")
 
     class FakeStore:
         def resolve_active_conversation(self, _user_key):

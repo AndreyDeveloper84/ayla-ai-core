@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ayla-ai-core"
-version = "0.7.4"
+version = "0.8.0"
 description = "Shared AI orchestration core for Ayla and Formula tela bot — AIConcierge, tools, anti-hallucination, multi-tenant brand voices"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,12 +23,19 @@ classifiers = [
 
 dependencies = [
     "openai>=1.40,<2.0",
-    "django>=5.2,<6.0",
     "asgiref>=3.7",
     "pydantic>=2.6",
 ]
 
 [project.optional-dependencies]
+# v0.8.0 (Arch-3 / DRF-687): Django moves to an optional extra. ayla itself
+# has no `import django` anywhere in src/ — the library is pure Python
+# 3.12+. Consumers that wire ayla into a Django app (orm-backed
+# ConversationStore impl, sync_to_async on store methods) install
+# `ayla-ai-core[django]` to pull a compatible version. Bot consumer
+# (`mysite/maxbot/`) + the new ai-bot-platform stack both pin via the
+# [django] extra so nothing changes for them.
+django = ["django>=5.2,<6.0"]
 # tiktoken — accurate token counting for the v0.7.3 history token-budget
 # guard (Obs-4). The library falls back to a 4-chars-per-token heuristic
 # when tiktoken is unavailable, but production consumers should install

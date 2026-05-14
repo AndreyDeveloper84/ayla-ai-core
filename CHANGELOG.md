@@ -11,6 +11,79 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-14 (PR-3 of 3 — final)
+
+Third and final PR of the v0.8.0 rollout. **Hard-breaking** in two
+narrow places: the v0.4-era Master\* aliases are removed and Django
+moves from a runtime dependency to an optional `[django]` extra.
+Consumers using the canonical `Specialist*` names + installing the
+library with `ayla-ai-core[django]` see zero migration cost.
+
+### Removed
+
+- **Master\* aliases** (Arch-4 / DRF-688):
+  - `MasterCandidate` — use `SpecialistCandidate[int]`
+  - `MasterContext` — use `SpecialistContext[int]`
+  - `build_master_context_from_candidates(...)` — use
+    `build_specialist_context_from_candidates(...)`
+  
+  These were marked DEPRECATED since v0.5+ but kept for the FROZEN
+  `mysite/maxbot/` consumer (which is pinned to v0.6.0 and never sees
+  v0.8.0). New regression tests in
+  `tests/test_candidate_context.py::TestArch4DeprecatedAliasesRemoved`
+  pin the removal so accidental re-introduction fails CI.
+- **Implicit Django runtime dependency** (Arch-3 / DRF-687):
+  - `pyproject.toml` no longer lists `django>=5.2,<6.0` in
+    `[project.dependencies]`. Moved to the new `[django]` optional
+    extra so plain `pip install ayla-ai-core` produces a Python-only
+    library with no Django pull.
+  - Bot consumer (`mysite/maxbot/`) + ai-bot-platform pin via
+    `ayla-ai-core[django] @ git+...` — for them, nothing changes.
+  - New regression test
+    `tests/test_candidate_context.py::TestArch3DjangoExtra::test_no_django_import_in_src`
+    walks every `.py` file in `src/ayla_ai_core/` and asserts no
+    `import django` / `from django` lines exist.
+
+### Migration cookbook (single PR for typical consumer)
+
+```toml
+# pyproject.toml — switch to the [django] extra (one-line change)
+ai-core = [
+-    "ayla-ai-core @ git+https://github.com/...@<v0.7.4-SHA>",
++    "ayla-ai-core[django] @ git+https://github.com/...@<v0.8.0-SHA>",
+]
+```
+
+```python
+# Any code still referencing the Master* aliases — sed-replace:
+- from ayla_ai_core import MasterCandidate, MasterContext, build_master_context_from_candidates
++ from ayla_ai_core import (
++     SpecialistCandidate,
++     SpecialistContext,
++     build_specialist_context_from_candidates,
++ )
+```
+
+That's it. Suite: **218/218 pass** (was 214 in rc2; +4 regression tests
+covering Arch-3 + Arch-4 contracts).
+
+### What v0.8.0 delivers end-to-end (rc1 + rc2 + final)
+
+- **Arch-5** (rc1): pluggable `CompletionAdapter` Protocol +
+  `OpenAIPassthroughAdapter` + `AnthropicCompletionAdapter`. Multi-provider
+  ready.
+- **Arch-6** (rc1): `parse_int` / `parse_uuid` canonical names.
+  Underscored aliases keep working through v0.8.x via PEP 562
+  `__getattr__` + `DeprecationWarning`. Removal in v0.9.0.
+- **Arch-2** (rc1): `PromptComposer` with section overrides. Default
+  rendering byte-identical to legacy `render_system_prompt`.
+- **Arch-1** (rc2): `CandidateContext[ID_T, ItemT]` runtime-checkable
+  Protocol. Non-booking consumers can supply their own context dataclass.
+- **Arch-3** (this): drop Django runtime dep → `[django]` extra.
+- **Arch-4** (this): remove Master\* aliases.
+
+Source: plan-eng-review (Software Architect skill, 2026-05-13).
+
 ## [0.8.0-rc2] — 2026-05-14 (PR-2 of 3-PR rollout)
 
 Second PR of the 3-PR v0.8.0 rollout. **Soft-breaking** — only the
