@@ -37,6 +37,8 @@ from __future__ import annotations
 from ayla_ai_core.composer import PromptComposer
 from ayla_ai_core.context import (
     ID_T,
+    CandidateContext,
+    ItemT,
     MasterCandidate,
     MasterContext,
     SpecialistCandidate,
@@ -118,10 +120,13 @@ __all__ = [
     # v0.8.0 (Arch-5 / DRF-689): pluggable provider adapters
     "AnthropicCompletionAdapter",
     "BrandVoiceConfig",
+    # v0.8.0 (Arch-1 / DRF-685): structural Protocol over context shapes
+    "CandidateContext",
     "ChatResponseDTO",
     "CompletionAdapter",
     "ConversationStore",
     "Example",
+    "ItemT",
     # Backward compat (deprecated, для бота до DRF-243)
     "MasterCandidate",
     "MasterContext",

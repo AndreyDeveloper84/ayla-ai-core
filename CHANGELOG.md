@@ -11,6 +11,52 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.8.0-rc2] — 2026-05-14 (PR-2 of 3-PR rollout)
+
+Second PR of the 3-PR v0.8.0 rollout. **Soft-breaking** — only the
+orchestrator's runtime check on `context_builder` return type
+changes from concrete-class `isinstance(SpecialistContext)` to
+structural `isinstance(CandidateContext)`. SpecialistContext callers
+keep working unchanged because they already satisfy the Protocol.
+
+### Added
+
+- **`CandidateContext[ID_T, ItemT]` Protocol** (Arch-1 / DRF-685).
+  Runtime-checkable structural Protocol. Required attributes:
+  `candidates: list[ItemT]`, `candidate_ids: frozenset[ID_T]`,
+  `summary_text: str`, `tenant_id: str`. Non-booking consumers (FAQ
+  skill, support-ticket skill) implement their own frozen dataclass
+  with these fields and pass it to `AIConcierge.send_message` via
+  `context_builder` — no longer required to subclass or alias
+  `SpecialistContext`.
+- **`ItemT` TypeVar** re-exported from `ayla_ai_core` for consumers
+  parameterising their own `CandidateContext` impls.
+
+### Changed
+
+- `AIConcierge.send_message` now validates the `context_builder` return
+  with `isinstance(..., CandidateContext)` instead of
+  `isinstance(..., SpecialistContext)`. The TypeError message updated.
+  Internal cast to `SpecialistContext[Any]` after the Protocol check
+  preserves the bundled `dispatch_tool_call` path (which uses booking-
+  shape fields like `by_id` / `candidate_service_ids` that the Protocol
+  intentionally omits). Non-booking consumers should inject their own
+  `tool_dispatcher` to handle their custom context shape.
+
+### Soft breaking
+
+The error message for an invalid `context_builder` return type changes
+from `"context_builder must return SpecialistContext, got ..."` to
+`"context_builder must return a CandidateContext (i.e. an object with
+.candidates, .candidate_ids, .summary_text, .tenant_id); got ..."`.
+Consumer test suites that grep the message text will need an update.
+
+### Backwards compat
+
+`SpecialistContext[ID_T]` keeps working as the booking-domain concrete
+impl; instances pass both `isinstance(x, SpecialistContext)` and
+`isinstance(x, CandidateContext)`. Master\* aliases still resolve.
+
 ## [0.8.0-rc1] — 2026-05-14 (PR-1 of 3-PR rollout)
 
 First **additive-only** PR of the v0.8.0 architecture refactor. Per the

@@ -51,7 +51,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from asgiref.sync import sync_to_async
 
-from ayla_ai_core.context import SpecialistContext
+from ayla_ai_core.context import CandidateContext, SpecialistContext
 from ayla_ai_core.observability import (
     current_tenant_id,
     scope_frozen_now,
@@ -553,11 +553,24 @@ class AIConcierge:
             specialist_context_raw = await self._context_builder()
         else:
             specialist_context_raw = await sync_to_async(self._context_builder)()
-        specialist_context = await _maybe_await(specialist_context_raw)
-        if not isinstance(specialist_context, SpecialistContext):
+        specialist_context_proto = await _maybe_await(specialist_context_raw)
+        # v0.8.0 (Arch-1 / DRF-685): widened from `isinstance(..., SpecialistContext)`
+        # to the structural Protocol so non-booking domains (FAQ chunks,
+        # support tickets) can supply their own dataclass without subclassing
+        # or aliasing SpecialistContext. The Protocol checks for the required
+        # field shape, not the concrete class.
+        if not isinstance(specialist_context_proto, CandidateContext):
             raise TypeError(
-                f"context_builder must return SpecialistContext, got {type(specialist_context)}"
+                f"context_builder must return a CandidateContext "
+                f"(i.e. an object with .candidates, .candidate_ids, "
+                f".summary_text, .tenant_id); got {type(specialist_context_proto)}"
             )
+        # The bundled dispatch_tool_call still operates on the booking-shape
+        # SpecialistContext (uses `by_id`, `candidate_service_ids`). Non-booking
+        # consumers must inject their own `tool_dispatcher` to handle their
+        # custom CandidateContext shape. Cast for mypy — runtime check above
+        # already ensured structural compatibility.
+        specialist_context: SpecialistContext[Any] = specialist_context_proto  # type: ignore[assignment]
 
         # v0.7.3 (DRF-681): bind tenant_id to the ContextVar so every log
         # record emitted by ayla — including from tool_handlers helpers that

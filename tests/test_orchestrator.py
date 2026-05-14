@@ -368,7 +368,9 @@ async def test_context_builder_must_return_master_context(
         context_builder=lambda: "not-a-context",
     )
 
-    with pytest.raises(TypeError, match="SpecialistContext"):
+    # v0.8.0 (Arch-1 / DRF-685): widened to CandidateContext Protocol;
+    # error message updated accordingly.
+    with pytest.raises(TypeError, match="CandidateContext"):
         await concierge.send_message(
             user_key=user_key, message_text="x",
             prompt_renderer=prompt_renderer,
