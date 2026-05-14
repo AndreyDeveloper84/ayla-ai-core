@@ -21,12 +21,17 @@ Wire format (JSON Schema field names в tools.py):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
 __all__ = [
     # Generic (preferred)
     "ID_T",
+    # v0.8.0 (Arch-1 / DRF-685): structural-typing Protocol over context
+    # shapes — lets non-booking domains (FAQ chunks, support tickets)
+    # implement the contract without subclassing or aliasing SpecialistContext.
+    "CandidateContext",
+    "ItemT",
     # Backward compat aliases (bot-side, deprecated)
     "MasterCandidate",
     "MasterContext",
@@ -41,6 +46,52 @@ __all__ = [
 # ID-type generic. Bot Формулы использует int (Django Master.id), Ayla — UUID
 # (SpecialistProfile.id). Также допустимо str (для UUID-as-string wire format).
 ID_T = TypeVar("ID_T", int, UUID, str)
+
+# Item-type generic (v0.8.0 / Arch-1 / DRF-685). The booking domain uses
+# `SpecialistCandidate[ID_T]` here; FAQ-style consumers can plug in their
+# own shape (e.g. a `KbChunk` dataclass) as long as it carries an `.id`
+# attribute the dispatcher can read.
+ItemT = TypeVar("ItemT")
+
+
+@runtime_checkable
+class CandidateContext(Protocol[ID_T, ItemT]):
+    """**Structural typing contract** for an LLM tool-call context.
+
+    v0.8.0 introduces this Protocol so the orchestrator can accept any
+    object that walks like a context, not just the booking-domain
+    :class:`SpecialistContext`. Non-booking consumers (FAQ skill,
+    support-ticket skill) implement their own frozen dataclass with the
+    same field names and pass it to :meth:`AIConcierge.send_message` via
+    ``context_builder``.
+
+    Required attributes (read-only):
+
+    - ``candidates: list[ItemT]`` — the top-N items that the LLM is
+      allowed to reference. ``ItemT.id`` must be of type ``ID_T``.
+    - ``candidate_ids: frozenset[ID_T]`` — pre-computed set of valid ids
+      for O(1) anti-hallucination check inside tool handlers.
+    - ``summary_text: str`` — rendered markdown summary that the prompt
+      builder splices into the system prompt slot (composer override
+      `masters_summary` for the booking template; a new section name
+      for other domains).
+    - ``tenant_id: str`` — multi-tenant isolation boundary, required.
+
+    Optional attributes (booking-domain only — Protocol intentionally
+    omits them so non-booking consumers don't have to provide):
+
+    - ``candidate_service_ids: frozenset[ID_T]``
+    - ``by_id: dict[ID_T, ItemT]``
+
+    The Protocol is :func:`runtime_checkable`, so the orchestrator can do
+    ``isinstance(ctx, CandidateContext)`` to validate consumer-supplied
+    objects without requiring inheritance from a concrete class.
+    """
+
+    candidates: list[ItemT]
+    candidate_ids: frozenset[ID_T]
+    summary_text: str
+    tenant_id: str
 
 
 @dataclass(frozen=True)
