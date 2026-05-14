@@ -34,6 +34,7 @@ Roadmap:
 """
 from __future__ import annotations
 
+from ayla_ai_core.composer import PromptComposer
 from ayla_ai_core.context import (
     ID_T,
     MasterCandidate,
@@ -71,13 +72,18 @@ from ayla_ai_core.prompts import (
     Example,
     render_system_prompt,
 )
+from ayla_ai_core.providers import (
+    AnthropicCompletionAdapter,
+    CompletionAdapter,
+    OpenAIPassthroughAdapter,
+)
 from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
     ToolResult,
-    _safe_int,
-    _safe_uuid,
     dispatch_tool_call,
+    parse_int,
+    parse_uuid,
 )
 from ayla_ai_core.tools import (
     ASK_CLARIFICATION,
@@ -90,7 +96,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.7.4"
+__version__ = "0.8.0"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
@@ -109,8 +115,11 @@ __all__ = [
     "TOOL_DEFINITIONS",
     "AIConcierge",
     "ActionType",
+    # v0.8.0 (Arch-5 / DRF-689): pluggable provider adapters
+    "AnthropicCompletionAdapter",
     "BrandVoiceConfig",
     "ChatResponseDTO",
+    "CompletionAdapter",
     "ConversationStore",
     "Example",
     # Backward compat (deprecated, для бота до DRF-243)
@@ -118,6 +127,9 @@ __all__ = [
     "MasterContext",
     "MasterResolver",
     "MessageRole",
+    "OpenAIPassthroughAdapter",
+    # v0.8.0 (Arch-2 / DRF-686): pluggable section-based prompt builder
+    "PromptComposer",
     # v0.7.3 observability surface (re-exported in v0.7.4 — DRF-681..684 follow-up)
     "ReplayDeterminismError",
     "ServiceResolver",
@@ -129,14 +141,17 @@ __all__ = [
     "ToolDispatcher",
     "ToolResult",
     "__version__",
-    "_safe_int",
-    "_safe_uuid",
     "build_master_context_from_candidates",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
     "current_frozen_now",
     "current_tenant_id",
     "dispatch_tool_call",
+    # v0.8.0 (Arch-6): canonical ID parsers. _safe_int / _safe_uuid
+    # underscored aliases reachable via __getattr__ below with
+    # DeprecationWarning — scheduled removal in v0.9.0.
+    "parse_int",
+    "parse_uuid",
     "render_summary_text",
     "render_system_prompt",
     "reset_tenant_id",
@@ -144,3 +159,30 @@ __all__ = [
     "scope_tenant_id",
     "set_tenant_id",
 ]
+
+
+# PEP 562 module-level __getattr__ — fires only for attributes NOT defined
+# at module scope. v0.8.0 (Arch-6): keep `_safe_int` / `_safe_uuid` accessible
+# via `from ayla_ai_core import _safe_int` but emit a DeprecationWarning on
+# every import so consumers see the rename before v0.9.0 removal.
+_DEPRECATED_ID_PARSER_ALIASES = {
+    "_safe_int": "parse_int",
+    "_safe_uuid": "parse_uuid",
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _DEPRECATED_ID_PARSER_ALIASES:
+        import warnings
+
+        new_name = _DEPRECATED_ID_PARSER_ALIASES[name]
+        warnings.warn(
+            f"`{name}` is deprecated since v0.8.0; use `{new_name}` instead. "
+            f"The alias will be removed in v0.9.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from ayla_ai_core import tool_handlers
+
+        return getattr(tool_handlers, name)
+    raise AttributeError(f"module 'ayla_ai_core' has no attribute {name!r}")

@@ -11,6 +11,63 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.8.0-rc1] — 2026-05-14 (PR-1 of 3-PR rollout)
+
+First **additive-only** PR of the v0.8.0 architecture refactor. Per the
+plan-eng-review (Software Architect skill, 2026-05-13), v0.8.0 lands as
+three sequential PRs to keep each independently releasable. rc1 contains
+the additive pieces (no break); rc2 adds the generic `CandidateContext`
+(soft break); the final v0.8.0 drops the Django runtime dep + Master*
+aliases (hard break).
+
+### Added
+
+- **`providers/` module — pluggable CompletionAdapter Protocol**
+  (Arch-5 / DRF-689).
+  - `CompletionAdapter` Protocol — normalises any provider's response into
+    OpenAI-shape that `_parse_completion` already handles
+  - `OpenAIPassthroughAdapter` — no-op default (preserves v0.7.x behaviour)
+  - `AnthropicCompletionAdapter` — converts Anthropic's `content[].type=tool_use`
+    blocks into OpenAI's `tool_calls` shape. Re-serialises `input` dict to
+    JSON string (OpenAI contract). Merges multiple text blocks with `\n\n`.
+    Handles both attribute-style and dict-style content blocks (Anthropic
+    SDK exposes both depending on version).
+  - `AIConcierge(..., completion_adapter=...)` — new optional kwarg.
+    `ChatResponseDTO.provider` now reads from the adapter (`"openai"` /
+    `"anthropic"` / etc.) instead of being hardcoded.
+- **`composer.py` — pluggable `PromptComposer`** (Arch-2 / DRF-686).
+  Fluent builder with `with_section(...)` / `with_examples(...)`. Default
+  rendering for FORMULA_TELA / AYLA voices is **byte-identical** to
+  `render_system_prompt(...)` — a regression test in `test_composer.py`
+  pins this so 20+ existing replay fixtures keep passing. Sections override
+  template slots (currently `masters_summary` — v0.9.0 will expand the
+  section-aware template engine to arbitrary names).
+- **`parse_int` / `parse_uuid` canonical names** (Arch-6 / DRF-690).
+  Renamed from `_safe_int` / `_safe_uuid`. The underscored names remain
+  reachable from `ayla_ai_core` via PEP 562 module-level `__getattr__`
+  with a `DeprecationWarning`. Internal default kwargs reference the new
+  names directly to avoid warning on every dispatch. Scheduled removal of
+  underscored aliases: **v0.9.0**.
+
+### Changed
+
+- `AIConcierge.__init__` gains `completion_adapter: CompletionAdapter | None = None`
+  (defaults to `OpenAIPassthroughAdapter()`).
+- `ChatResponseDTO.provider` populated from the adapter, not hardcoded
+  `"openai"`.
+
+### Backwards compat
+
+PR-1 is **purely additive**. v0.7.4 consumers see no signature change at
+any public entry point. New `[ai-core]` extras / kwargs default to legacy
+behaviour. The migration path for downstream consumers (ai-bot-platform's
+`ayla_adapter.py`, `tests/smoke/test_ayla_import.py`) is zero call-site
+changes — the pin-bump alone delivers the value.
+
+The next PR (rc2) will introduce `CandidateContext[ID_T, ItemT]` as a
+generic of `SpecialistContext` and change one `isinstance` check to a
+Protocol; consumers using direct `SpecialistContext` see no break.
+
 ## [0.7.4] — 2026-05-13
 
 Post-release hotfix surfaced by an in-depth code review of v0.7.0 → v0.7.3
