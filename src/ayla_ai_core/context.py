@@ -32,15 +32,16 @@ __all__ = [
     # implement the contract without subclassing or aliasing SpecialistContext.
     "CandidateContext",
     "ItemT",
-    # Backward compat aliases (bot-side, deprecated)
-    "MasterCandidate",
-    "MasterContext",
     "SpecialistCandidate",
     "SpecialistContext",
-    "build_master_context_from_candidates",
     "build_specialist_context_from_candidates",
     "render_summary_text",
 ]
+# v0.8.0 (Arch-4 / DRF-688): removed deprecated aliases from v0.4 era —
+# `MasterCandidate`, `MasterContext`, `build_master_context_from_candidates`.
+# Bot consumer (`mysite/maxbot/`) is FROZEN per Sprint 0 (stays on v0.6.0).
+# All other consumers already migrated to the Specialist* names per the
+# v0.7.0 mandatory tenant_id pass.
 
 
 # ID-type generic. Bot Формулы использует int (Django Master.id), Ayla — UUID
@@ -246,25 +247,9 @@ def build_specialist_context_from_candidates[ID_T: (int, UUID, str)](
     )
 
 
-# ─── Backward compat aliases (DRF-237 → DRF-238) ──────────────────────────
-# Bot Формулы использует MasterCandidate / MasterContext до DRF-243 миграции.
-# После DRF-243 эти aliases можно удалить.
-
-MasterCandidate = SpecialistCandidate[int]
-"""DEPRECATED: используй SpecialistCandidate[int]. Alias для backward compat с ботом."""
-
-MasterContext = SpecialistContext[int]
-"""DEPRECATED: используй SpecialistContext[int]. Alias для backward compat с ботом."""
-
-
-def build_master_context_from_candidates(
-    candidates: list[SpecialistCandidate[int]],
-    *,
-    tenant_id: str,
-) -> SpecialistContext[int]:
-    """DEPRECATED: используй build_specialist_context_from_candidates.
-
-    **v0.7.0**: tenant_id теперь обязательный — single-tenant консумеры
-    передают стабильный sentinel (например, "formula-tela").
-    """
-    return build_specialist_context_from_candidates(candidates, tenant_id=tenant_id)
+# v0.8.0 (Arch-4 / DRF-688): the v0.4-era `MasterCandidate` /
+# `MasterContext` / `build_master_context_from_candidates` aliases have
+# been removed. All consumers that imported these names use the canonical
+# `Specialist*` / `build_specialist_*` API since at least v0.7.0 (the
+# mandatory-tenant_id migration pass). Bot consumer (`mysite/maxbot/`) is
+# FROZEN per Sprint 0 and stays on v0.6.0 — it never sees v0.8.0.

@@ -17,10 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from ayla_ai_core.context import (
-    MasterCandidate,
     SpecialistCandidate,
     SpecialistContext,
-    build_master_context_from_candidates,
     build_specialist_context_from_candidates,
 )
 from ayla_ai_core.tool_handlers import (
@@ -44,17 +42,17 @@ def master_context():
     - Борис (id=2): услуга 12 (СПА)
     """
     candidates = [
-        MasterCandidate(
+        SpecialistCandidate(
             id=1, name="Анна", specialization="массаж",
             services=[(10, "массаж спины"), (11, "лимфодренаж")],
         ),
-        MasterCandidate(
+        SpecialistCandidate(
             id=2, name="Борис", specialization="спа",
             services=[(12, "СПА")],
         ),
     ]
     # v0.7.0: tenant_id mandatory. Synthetic test value — clearly not real.
-    return build_master_context_from_candidates(candidates, tenant_id="test-tenant")
+    return build_specialist_context_from_candidates(candidates, tenant_id="test-tenant")
 
 
 def _make_tool_call(name: str, arguments: str, tc_id: str = "tc_1"):
@@ -750,7 +748,7 @@ class TestStrictCrossTenantGuard:
     Opt-out per resolver via __resolver_skips_tenant_check__ = True.
     """
 
-    def _minimal_context(self, *, tenant_id: str) -> SpecialistContext[int]:
+    def _minimal_context(self, *, tenant_id: str) -> SpecialistContext:
         candidates = [
             SpecialistCandidate(
                 id=1, name="Anna",

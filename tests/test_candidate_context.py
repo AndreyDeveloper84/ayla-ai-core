@@ -8,9 +8,9 @@ import pytest
 
 from ayla_ai_core.context import (
     CandidateContext,
-    MasterCandidate,
+    SpecialistCandidate,
     SpecialistContext,
-    build_master_context_from_candidates,
+    build_specialist_context_from_candidates,
 )
 
 
@@ -23,9 +23,9 @@ class TestCandidateContextStructuralCheck:
     def test_specialist_context_satisfies_protocol(self) -> None:
         """The booking-domain class must already conform — no migration."""
         candidates = [
-            MasterCandidate(id=1, name="Анна", specialization="м", services=[(10, "s")]),
+            SpecialistCandidate(id=1, name="Анна", specialization="м", services=[(10, "s")]),
         ]
-        ctx = build_master_context_from_candidates(candidates, tenant_id="t")
+        ctx = build_specialist_context_from_candidates(candidates, tenant_id="t")
         assert isinstance(ctx, CandidateContext)
 
     def test_non_booking_dataclass_with_same_shape_passes(self) -> None:
@@ -185,9 +185,60 @@ class TestCandidateContextDocstringContract:
         assert SpecialistContext is not None
         # SpecialistContext is a dataclass subscriptable for generic;
         # the runtime instance must still pass the Protocol check.
-        ctx = build_master_context_from_candidates(
-            [MasterCandidate(id=1, name="A", specialization="m", services=[(10, "s")])],
+        ctx = build_specialist_context_from_candidates(
+            [SpecialistCandidate(id=1, name="A", specialization="m", services=[(10, "s")])],
             tenant_id="t",
         )
         assert isinstance(ctx, SpecialistContext)
         assert isinstance(ctx, CandidateContext)
+
+
+class TestArch4DeprecatedAliasesRemoved:
+    """v0.8.0 (Arch-4 / DRF-688): MasterCandidate / MasterContext /
+    build_master_context_from_candidates have been REMOVED. Pin this so
+    a future accidental re-introduction fails CI loudly."""
+
+    def test_master_candidate_alias_is_gone(self) -> None:
+        import ayla_ai_core
+        import ayla_ai_core.context as ctx_mod
+
+        assert not hasattr(ctx_mod, "MasterCandidate")
+        assert not hasattr(ayla_ai_core, "MasterCandidate")
+
+    def test_master_context_alias_is_gone(self) -> None:
+        import ayla_ai_core
+        import ayla_ai_core.context as ctx_mod
+
+        assert not hasattr(ctx_mod, "MasterContext")
+        assert not hasattr(ayla_ai_core, "MasterContext")
+
+    def test_build_master_context_alias_is_gone(self) -> None:
+        import ayla_ai_core
+        import ayla_ai_core.context as ctx_mod
+
+        assert not hasattr(ctx_mod, "build_master_context_from_candidates")
+        assert not hasattr(ayla_ai_core, "build_master_context_from_candidates")
+
+
+class TestArch3DjangoExtra:
+    """v0.8.0 (Arch-3 / DRF-687): Django moved from runtime deps to
+    [django] optional extra. The library has no `import django` in src/.
+    """
+
+    def test_no_django_import_in_src(self) -> None:
+        """Smoke: the library must not import django at import time so
+        consumers without the [django] extra can use ayla."""
+        import pathlib
+
+        import ayla_ai_core
+
+        src_root = pathlib.Path(ayla_ai_core.__file__).parent
+        for py_file in src_root.rglob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            assert "import django" not in text, (
+                f"{py_file} contains `import django` — v0.8.0 promises no "
+                "Django runtime dep."
+            )
+            assert "from django" not in text, (
+                f"{py_file} contains `from django` — same as above."
+            )

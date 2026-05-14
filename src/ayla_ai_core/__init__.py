@@ -39,11 +39,8 @@ from ayla_ai_core.context import (
     ID_T,
     CandidateContext,
     ItemT,
-    MasterCandidate,
-    MasterContext,
     SpecialistCandidate,
     SpecialistContext,
-    build_master_context_from_candidates,
     build_specialist_context_from_candidates,
     render_summary_text,
 )
@@ -128,8 +125,6 @@ __all__ = [
     "Example",
     "ItemT",
     # Backward compat (deprecated, для бота до DRF-243)
-    "MasterCandidate",
-    "MasterContext",
     "MasterResolver",
     "MessageRole",
     "OpenAIPassthroughAdapter",
@@ -146,7 +141,6 @@ __all__ = [
     "ToolDispatcher",
     "ToolResult",
     "__version__",
-    "build_master_context_from_candidates",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
     "current_frozen_now",
