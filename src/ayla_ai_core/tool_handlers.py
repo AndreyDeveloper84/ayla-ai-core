@@ -60,7 +60,7 @@ __all__ = [
     "handle_show_my_bookings",
     "handle_show_slots",
     # Canonical public ID parsers (v0.8.0+). Underscored aliases below
-    # are kept for one version with a DeprecationWarning.
+    # are kept through v0.8.x with a DeprecationWarning, removed in v0.9.0.
     "parse_int",
     "parse_uuid",
 ]
