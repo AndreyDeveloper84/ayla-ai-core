@@ -437,10 +437,10 @@ async def test_sync_context_builder_runs_off_event_loop(
 async def test_orchestrator_with_uuid_id_parser_end_to_end(
     store, prompt_renderer
 ) -> None:
-    """Ayla scenario: AIConcierge с _safe_uuid + SpecialistContext[UUID]."""
+    """Ayla scenario: AIConcierge с parse_uuid + SpecialistContext[UUID]."""
     from uuid import UUID
 
-    from ayla_ai_core import _safe_uuid
+    from ayla_ai_core import parse_uuid
     from ayla_ai_core.context import (
         SpecialistCandidate,
         build_specialist_context_from_candidates,
@@ -465,7 +465,7 @@ async def test_orchestrator_with_uuid_id_parser_end_to_end(
         openai_client=client,
         store=store,
         context_builder=lambda: uuid_context,
-        id_parser=_safe_uuid,
+        id_parser=parse_uuid,
     )
 
     result = await concierge.send_message(
@@ -863,14 +863,14 @@ class TestParallelToolCalls:
     @staticmethod
     def _parse(master_context, tool_calls_specs):
         from ayla_ai_core.orchestrator import _parse_completion
-        from ayla_ai_core.tool_handlers import _safe_int
+        from ayla_ai_core.tool_handlers import parse_int
 
         return _parse_completion(
             _fake_completion_multi(tool_calls_specs),
             master_context,
             master_resolver=None,
             service_resolver=None,
-            id_parser=_safe_int,
+            id_parser=parse_int,
         )
 
     def test_single_tool_call_extra_actions_is_none(self, master_context):

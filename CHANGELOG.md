@@ -11,6 +11,45 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-05-14
+
+Purely additive patch — process documentation + a public-API surface
+drift gate. **No behavioural changes.** v1.0.0 stabilization is **not**
+ready yet (see "Why v0.8.1 not v1.0.0" below); this release lays the
+groundwork.
+
+### Added
+
+- **`RELEASING.md`** — release process documentation: semver rules
+  (with explicit pre-1.0 caveat acknowledgment), step-by-step release
+  flow, SHA pin discipline, security patch coordination, deprecation
+  windows, CI gates.
+- **`LTS_POLICY.md`** — public support commitment for v1.x+ once the
+  API is frozen. Defines what "supported" means, version-line support
+  table, security disclosure flow.
+- **`tests/test_public_api_surface.py`** — three regression tests:
+  - `test_public_api_matches_expected_snapshot` — pins `__all__` to a
+    deliberate `EXPECTED_PUBLIC_API` frozenset so accidental
+    additions / removals fail CI.
+  - `test_every_public_symbol_is_actually_exported` — typo guard for
+    `__all__` entries.
+  - `test_every_public_symbol_has_a_docstring_or_is_data` — docstring
+    discipline for callables / classes.
+
+### Why v0.8.1 not v1.0.0
+
+v0.8.0 only just landed in `ai-bot-platform` consumer (pin merged
+hours before this release). v1.0.0 promises 12-month API stability
+per `LTS_POLICY.md`; making that promise before any production
+adoption traffic is data-free speculation. v0.8.1 ships the
+**infrastructure** for an eventual v1.0.0 freeze (process docs +
+drift test) but explicitly stays under the pre-1.0 caveat. The
+freeze decision happens after 2-4 weeks of production traffic.
+
+### Migration
+
+None. Pure additive — consumers see no API change.
+
 ## [0.8.0] — 2026-05-14 (PR-3 of 3 — final)
 
 Third and final PR of the v0.8.0 rollout. **Hard-breaking** in two

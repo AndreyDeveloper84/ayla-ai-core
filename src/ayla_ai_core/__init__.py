@@ -95,7 +95,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
@@ -171,6 +171,12 @@ _DEPRECATED_ID_PARSER_ALIASES = {
 
 
 def __getattr__(name: str) -> object:
+    """Fallback attribute lookup for deprecated v0.8.x aliases.
+
+    Pre-v0.9.0 the package keeps ``_safe_int`` / ``_safe_uuid`` accessible
+    via this hook but emits a ``DeprecationWarning`` so consumers can
+    migrate to ``parse_int`` / ``parse_uuid`` before the next minor.
+    """
     if name in _DEPRECATED_ID_PARSER_ALIASES:
         import warnings
 
@@ -182,6 +188,5 @@ def __getattr__(name: str) -> object:
             stacklevel=2,
         )
         from ayla_ai_core import tool_handlers
-
         return getattr(tool_handlers, name)
     raise AttributeError(f"module 'ayla_ai_core' has no attribute {name!r}")
