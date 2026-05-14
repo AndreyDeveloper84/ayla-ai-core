@@ -57,12 +57,13 @@ from ayla_ai_core.observability import (
     scope_frozen_now,
     scope_tenant_id,
 )
+from ayla_ai_core.providers.base import CompletionAdapter, OpenAIPassthroughAdapter
 from ayla_ai_core.tool_handlers import (
     MasterResolver,
     ServiceResolver,
     ToolResult,
-    _safe_int,
     dispatch_tool_call,
+    parse_int,
 )
 from ayla_ai_core.tools import TOOL_DEFINITIONS, ActionType
 
@@ -457,8 +458,9 @@ class AIConcierge:
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         history_token_budget: int | None = DEFAULT_HISTORY_TOKEN_BUDGET,
         tool_definitions: list[dict] | None = None,
-        id_parser: Callable[[Any], Any] = _safe_int,
+        id_parser: Callable[[Any], Any] = parse_int,
         tool_dispatcher: ToolDispatcher | None = None,
+        completion_adapter: CompletionAdapter | None = None,
     ) -> None:
         """Construct AIConcierge.
 
@@ -492,6 +494,12 @@ class AIConcierge:
         self._history_token_budget = history_token_budget
         self._tool_definitions = tool_definitions or TOOL_DEFINITIONS
         self._id_parser = id_parser
+        # v0.8.0 (Arch-5 / DRF-689): adapter normalises provider response
+        # into OpenAI-shape before _parse_completion sees it. Default is
+        # the no-op passthrough so v0.7.x consumers see zero behaviour change.
+        self._completion_adapter: CompletionAdapter = (
+            completion_adapter or OpenAIPassthroughAdapter()
+        )
         self._tool_dispatcher = tool_dispatcher
 
         # async-обёртки для sync ORM-методов store
@@ -580,14 +588,23 @@ class AIConcierge:
                 model_name=self._model_name,
             )
 
-            # 7. Call OpenAI с tools
+            # 7. Call the LLM provider с tools (slot named openai_client for
+            # historical reasons; v0.8.0 supports any provider via the
+            # CompletionAdapter Protocol — see Arch-5 / DRF-689).
             started = time.monotonic()
-            completion = await self._openai_client.chat.completions.create(
+            raw_completion = await self._openai_client.chat.completions.create(
                 model=self._model_name,
                 messages=llm_messages,
                 tools=self._tool_definitions,
             )
             latency_ms = int((time.monotonic() - started) * 1000)
+
+            # v0.8.0 (Arch-5): normalise provider response into OpenAI shape.
+            # The passthrough default returns `raw_completion` unchanged;
+            # AnthropicCompletionAdapter rewrites Anthropic's content[].type
+            # blocks into the OpenAI tool_calls / message.content shape that
+            # _parse_completion expects.
+            completion = self._completion_adapter.normalize(raw_completion)
 
             # 8. Parse: content + opt action(s).
             # v0.7.2 (DRF-678): _parse_completion now returns an extra
@@ -640,5 +657,5 @@ class AIConcierge:
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 model=self._model_name,
-                provider="openai",  # v0.8.0 will multiplex via L-track router
+                provider=self._completion_adapter.provider_name,  # v0.8.0 / Arch-5
             )

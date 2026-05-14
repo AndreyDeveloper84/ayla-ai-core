@@ -50,6 +50,7 @@ __all__ = [
     "MasterResolver",
     "ServiceResolver",
     "ToolResult",
+    # Deprecated since v0.8.0 — alias-only, scheduled removal in v0.9.0.
     "_safe_int",
     "_safe_uuid",
     "dispatch_tool_call",
@@ -58,6 +59,10 @@ __all__ = [
     "handle_show_masters",
     "handle_show_my_bookings",
     "handle_show_slots",
+    # Canonical public ID parsers (v0.8.0+). Underscored aliases below
+    # are kept for one version with a DeprecationWarning.
+    "parse_int",
+    "parse_uuid",
 ]
 
 
@@ -94,12 +99,17 @@ class ToolResult:
 # ─── ID parsers ───────────────────────────────────────────────────────────
 
 
-def _safe_int(value: Any) -> int | None:
+def parse_int(value: Any) -> int | None:
     """Defensive int cast. None / "" / "abc" / [] / bool → None.
 
     bool — guarded explicitly: int(True) == 1 silently matches candidate_id=1
     if LLM ever emits a JSON boolean. Floats are truncated (int(1.7) == 1) —
     treated as LLM intent error elsewhere via candidate_id check.
+
+    **Renamed from** ``_safe_int`` in v0.8.0. The underscored alias is
+    kept for one minor with a :class:`DeprecationWarning` (emitted by the
+    package-level alias re-export — internal default kwargs still point
+    at this canonical name to avoid warning on every dispatch).
     """
     if value is None or value == "" or isinstance(value, bool):
         return None
@@ -109,11 +119,14 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
-def _safe_uuid(value: Any) -> UUID | None:
+def parse_uuid(value: Any) -> UUID | None:
     """Defensive UUID cast. None / "" / non-UUID-string / non-string → None.
 
     Используется как `id_parser` для Ayla (SpecialistProfile.id). LLM эмиттит
     UUID как строку в JSON; UUID()-конструктор поднимает ValueError на не-UUID.
+
+    **Renamed from** ``_safe_uuid`` in v0.8.0. See :func:`parse_int` for the
+    deprecation policy of the underscored alias.
     """
     if value is None or value == "":
         return None
@@ -125,6 +138,14 @@ def _safe_uuid(value: Any) -> UUID | None:
         return UUID(value)
     except (ValueError, AttributeError):
         return None
+
+
+# Deprecated aliases — same callable object, NO DeprecationWarning at module
+# scope (would fire on every internal default-kwarg evaluation). The package
+# `__init__.py` re-export emits the warning via PEP 562 `__getattr__` so it
+# fires on explicit `from ayla_ai_core import _safe_int` consumer imports.
+_safe_int = parse_int
+_safe_uuid = parse_uuid
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -226,7 +247,7 @@ def handle_show_masters(
     args: dict[str, Any],
     context: SpecialistContext[Any],
     *,
-    id_parser: Callable[[Any], Any] = _safe_int,
+    id_parser: Callable[[Any], Any] = parse_int,
 ) -> ToolResult:
     """Validate master_ids в context.candidate_ids, drop invalid silently.
 
@@ -294,7 +315,7 @@ def handle_show_slots(
     args: dict[str, Any],
     context: SpecialistContext[Any],
     *,
-    id_parser: Callable[[Any], Any] = _safe_int,
+    id_parser: Callable[[Any], Any] = parse_int,
 ) -> ToolResult:
     """Validate (master_id, service_id) в context + ISO date.
 
@@ -349,7 +370,7 @@ def handle_confirm_booking(
     *,
     master_resolver: MasterResolver | None = None,
     service_resolver: ServiceResolver | None = None,
-    id_parser: Callable[[Any], Any] = _safe_int,
+    id_parser: Callable[[Any], Any] = parse_int,
 ) -> ToolResult:
     """Validate (master_id, service_id) + ISO datetime.
 
@@ -504,7 +525,7 @@ def dispatch_tool_call(
     *,
     master_resolver: MasterResolver | None = None,
     service_resolver: ServiceResolver | None = None,
-    id_parser: Callable[[Any], Any] = _safe_int,
+    id_parser: Callable[[Any], Any] = parse_int,
 ) -> ToolResult:
     """Главный диспетчер. Принимает OpenAI tool_call object, возвращает ToolResult.
 
