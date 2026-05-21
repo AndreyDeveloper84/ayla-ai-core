@@ -11,6 +11,10 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+### Documentation
+
+- **`docs/ADR-0009-split-domain-context.md`** — context-only mirror of the canonical ADR-0009 (Ayla split-domain architecture, accepted 2026-05-20 in ai-bot-platform). **No code changes.** Per the ADR, ayla-ai-core is a «pure Python AI library, unchanged, v0.8.1 → v1.0 freeze, pinned via `git+ssh@vX.Y.Z` in both consumers». This doc explains *why* the library's public API is frozen through Phase 0. Canonical source: [`ai-bot-platform/docs/adr/ADR-0009-...`](https://github.com/AndreyDeveloper84/ai-bot-platform/blob/dev/docs/adr/ADR-0009-ayla-split-domain-architecture.md).
+
 ## [0.8.1] — 2026-05-14
 
 Purely additive patch — process documentation + a public-API surface
