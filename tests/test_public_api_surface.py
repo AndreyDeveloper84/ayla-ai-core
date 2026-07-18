@@ -30,6 +30,7 @@ EXPECTED_PUBLIC_API: frozenset[str] = frozenset({
     "DEFAULT_MODEL_NAME",
     "FORMULA_TELA_VOICE",
     "ID_T",
+    "MEMORY_BLOCK_HEADER",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
@@ -58,6 +59,7 @@ EXPECTED_PUBLIC_API: frozenset[str] = frozenset({
     "ToolResult",
     "__version__",
     # Functions
+    "build_memory_block",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
     "current_frozen_now",
@@ -145,6 +147,7 @@ def test_every_public_symbol_has_a_docstring_or_is_data() -> None:
         "FORMULA_TELA_VOICE",
         "ID_T",
         "ItemT",
+        "MEMORY_BLOCK_HEADER",
         "SHOW_MASTERS",
         "SHOW_MY_BOOKINGS",
         "SHOW_SLOTS",

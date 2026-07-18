@@ -16,6 +16,8 @@ Public API (semver-stable):
 - _safe_int / _safe_uuid — id parsers (DRF-238)
 - MasterContext / MasterCandidate — DEPRECATED aliases на SpecialistContext[int].
   Бот использует до DRF-243 миграции; после удалить.
+- build_memory_block / MEMORY_BLOCK_HEADER — memory-block (зелёная зона
+  персональной памяти) для system_prompt concierge (W5, pilot 2026-08-15).
 
 Internal helpers (handle_*) НЕ экспортируются — caller'ы используют
 dispatch_tool_call. Прямой импорт остаётся возможным
@@ -44,6 +46,7 @@ from ayla_ai_core.context import (
     build_specialist_context_from_candidates,
     render_summary_text,
 )
+from ayla_ai_core.memory import MEMORY_BLOCK_HEADER, build_memory_block
 from ayla_ai_core.observability import (
     ReplayDeterminismError,
     TenantContextFilter,
@@ -108,6 +111,8 @@ __all__ = [
     "DEFAULT_MODEL_NAME",
     "FORMULA_TELA_VOICE",
     "ID_T",
+    # W5 (pilot 2026-08-15): green-zone memory block for the concierge system prompt
+    "MEMORY_BLOCK_HEADER",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
@@ -141,6 +146,7 @@ __all__ = [
     "ToolDispatcher",
     "ToolResult",
     "__version__",
+    "build_memory_block",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
     "current_frozen_now",
