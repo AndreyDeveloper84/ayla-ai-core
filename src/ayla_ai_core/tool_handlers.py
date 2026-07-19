@@ -50,7 +50,7 @@ __all__ = [
     "MasterResolver",
     "ServiceResolver",
     "ToolResult",
-    # Deprecated since v0.8.0 — alias-only, scheduled removal in v0.9.0.
+    # Deprecated since v0.8.0 — alias-only, scheduled removal in v0.10.0.
     "_safe_int",
     "_safe_uuid",
     "dispatch_tool_call",
@@ -60,7 +60,7 @@ __all__ = [
     "handle_show_my_bookings",
     "handle_show_slots",
     # Canonical public ID parsers (v0.8.0+). Underscored aliases below
-    # are kept through v0.8.x with a DeprecationWarning, removed in v0.9.0.
+    # are kept through v0.8.x with a DeprecationWarning, removed in v0.10.0.
     "parse_int",
     "parse_uuid",
 ]

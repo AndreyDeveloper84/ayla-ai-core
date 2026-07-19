@@ -11,6 +11,8 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-18
+
 ### Added
 
 - **Memory block exported from package root** (W5 / pilot 2026-08-15).
@@ -37,6 +39,14 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 None. Pure additive — `__all__` grows by two symbols, no signatures
 change. `tests/test_public_api_surface.py::EXPECTED_PUBLIC_API` snapshot
 updated accordingly.
+
+### Deprecated
+
+- `_safe_int` / `_safe_uuid` underscored aliases — removal **rescheduled
+  from v0.9.0 to v0.10.0** (post-pilot; orchestrator decision 2026-07-18,
+  keeps the pilot wave free of breaking changes). The aliases keep
+  working via PEP 562 `__getattr__` with `DeprecationWarning`; use
+  `parse_int` / `parse_uuid`.
 
 ### Documentation
 
