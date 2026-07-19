@@ -11,6 +11,43 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-07-18
+
+### Added
+
+- **Memory block exported from package root** (W5 / pilot 2026-08-15).
+  `build_memory_block` and `MEMORY_BLOCK_HEADER` now import directly via
+  `from ayla_ai_core import build_memory_block` — previously they were only
+  reachable from the `ayla_ai_core.memory` submodule, so SHA-pinned
+  consumers had no stable surface to code against. The module renders the
+  green-zone personal-memory block for the concierge system prompt
+  (ADR-0009 §Memory model: green-zone facts are reusable across providers
+  within consent): confidence-aware (`>= 0.8` asserted, `0.4–0.8` softened
+  with «кажется», `< 0.4` routed to a "Стоит уточнить" line) with a top-8
+  fact cap (`max_facts`). Consent gating (`memory_green`) remains the
+  caller's responsibility and happens before this builder is invoked
+  (MEMORY_CONSENT_SPEC).
+  Shipped as a deliberate additive export under the pre-1.0 caveat —
+  per ADR-0009 the surface otherwise stays frozen through Phase 0;
+  breaking changes still wait for v1.0. Rationale: unblock the
+  `ai-bot-platform` concierge wiring (W5 phase 2) ahead of the
+  2026-08-15 pilot, expanding the public contract by exactly the two
+  symbols consumers reference.
+
+### Migration
+
+None. Pure additive — `__all__` grows by two symbols, no signatures
+change. `tests/test_public_api_surface.py::EXPECTED_PUBLIC_API` snapshot
+updated accordingly.
+
+### Deprecated
+
+- `_safe_int` / `_safe_uuid` underscored aliases — removal **rescheduled
+  from v0.9.0 to v0.10.0** (post-pilot; orchestrator decision 2026-07-18,
+  keeps the pilot wave free of breaking changes). The aliases keep
+  working via PEP 562 `__getattr__` with `DeprecationWarning`; use
+  `parse_int` / `parse_uuid`.
+
 ### Documentation
 
 - **`docs/ADR-0009-split-domain-context.md`** — context-only mirror of the canonical ADR-0009 (Ayla split-domain architecture, accepted 2026-05-20 in ai-bot-platform). **No code changes.** Per the ADR, ayla-ai-core is a «pure Python AI library, unchanged, v0.8.1 → v1.0 freeze, pinned via `git+ssh@vX.Y.Z` in both consumers». This doc explains *why* the library's public API is frozen through Phase 0. Canonical source: [`ai-bot-platform/docs/adr/ADR-0009-...`](https://github.com/AndreyDeveloper84/ai-bot-platform/blob/dev/docs/adr/ADR-0009-ayla-split-domain-architecture.md).

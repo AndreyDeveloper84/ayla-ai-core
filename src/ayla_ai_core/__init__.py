@@ -16,6 +16,8 @@ Public API (semver-stable):
 - _safe_int / _safe_uuid — id parsers (DRF-238)
 - MasterContext / MasterCandidate — DEPRECATED aliases на SpecialistContext[int].
   Бот использует до DRF-243 миграции; после удалить.
+- build_memory_block / MEMORY_BLOCK_HEADER — memory-block (зелёная зона
+  персональной памяти) для system_prompt concierge (W5, pilot 2026-08-15).
 
 Internal helpers (handle_*) НЕ экспортируются — caller'ы используют
 dispatch_tool_call. Прямой импорт остаётся возможным
@@ -44,6 +46,7 @@ from ayla_ai_core.context import (
     build_specialist_context_from_candidates,
     render_summary_text,
 )
+from ayla_ai_core.memory import MEMORY_BLOCK_HEADER, build_memory_block
 from ayla_ai_core.observability import (
     ReplayDeterminismError,
     TenantContextFilter,
@@ -95,7 +98,7 @@ from ayla_ai_core.tools import (
     build_tool_definitions,
 )
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 __all__ = [
     # Tool definitions (factory + default int constants)
@@ -108,6 +111,8 @@ __all__ = [
     "DEFAULT_MODEL_NAME",
     "FORMULA_TELA_VOICE",
     "ID_T",
+    # W5 (pilot 2026-08-15): green-zone memory block for the concierge system prompt
+    "MEMORY_BLOCK_HEADER",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
@@ -141,6 +146,7 @@ __all__ = [
     "ToolDispatcher",
     "ToolResult",
     "__version__",
+    "build_memory_block",
     "build_specialist_context_from_candidates",
     "build_tool_definitions",
     "current_frozen_now",
@@ -148,7 +154,7 @@ __all__ = [
     "dispatch_tool_call",
     # v0.8.0 (Arch-6): canonical ID parsers. _safe_int / _safe_uuid
     # underscored aliases reachable via __getattr__ below with
-    # DeprecationWarning — scheduled removal in v0.9.0.
+    # DeprecationWarning — scheduled removal in v0.10.0.
     "parse_int",
     "parse_uuid",
     "render_summary_text",
@@ -163,7 +169,7 @@ __all__ = [
 # PEP 562 module-level __getattr__ — fires only for attributes NOT defined
 # at module scope. v0.8.0 (Arch-6): keep `_safe_int` / `_safe_uuid` accessible
 # via `from ayla_ai_core import _safe_int` but emit a DeprecationWarning on
-# every import so consumers see the rename before v0.9.0 removal.
+# every import so consumers see the rename before v0.10.0 removal.
 _DEPRECATED_ID_PARSER_ALIASES = {
     "_safe_int": "parse_int",
     "_safe_uuid": "parse_uuid",
@@ -173,7 +179,7 @@ _DEPRECATED_ID_PARSER_ALIASES = {
 def __getattr__(name: str) -> object:
     """Fallback attribute lookup for deprecated v0.8.x aliases.
 
-    Pre-v0.9.0 the package keeps ``_safe_int`` / ``_safe_uuid`` accessible
+    Pre-v0.10.0 the package keeps ``_safe_int`` / ``_safe_uuid`` accessible
     via this hook but emits a ``DeprecationWarning`` so consumers can
     migrate to ``parse_int`` / ``parse_uuid`` before the next minor.
     """
@@ -183,7 +189,7 @@ def __getattr__(name: str) -> object:
         new_name = _DEPRECATED_ID_PARSER_ALIASES[name]
         warnings.warn(
             f"`{name}` is deprecated since v0.8.0; use `{new_name}` instead. "
-            f"The alias will be removed in v0.9.0.",
+            f"The alias will be removed in v0.10.0.",
             DeprecationWarning,
             stacklevel=2,
         )
