@@ -82,7 +82,9 @@ _WEEKDAY_LABELS = {
     "sun": "воскресенье",
 }
 
-# Приоритет полей в блоке (для top-N усечения при лимите).
+# Приоритет СТРОК блока (для top-N усечения при лимите). Имена здесь — имена
+# рендерящихся строк, а не обязательно ключей входного словаря: строка
+# «Бюджет» склеивается из двух ключей и живёт под собственным именем.
 _FIELD_ORDER = (
     "favorite_masters",
     "preferred_time_slots",
@@ -95,6 +97,48 @@ _FIELD_ORDER = (
     "diet_type",
     "prefers_flexible_cancellation",
 )
+
+# Ключ контекста -> имя строки в _FIELD_ORDER, когда они НЕ совпадают.
+# Единственный такой случай — бюджет: во входном словаре его нет вовсе,
+# есть price_range_min/price_range_max. Без этой карты оба ключа получали
+# приоритет «неизвестный» и уезжали в хвост, а строка "price_range"
+# в _FIELD_ORDER была мёртвой (DRF-1374).
+_CONTEXT_KEY_TO_FIELD = {
+    "price_range_min": "price_range",
+    "price_range_max": "price_range",
+}
+
+# Ключи контекста, которые рендерер умеет разбирать. Всё остальное молча
+# игнорируется (§2: не выдумываем; чужой/красный ключ не должен ронять
+# диалог). Множество load-bearing: это гейт цикла, поэтому ветка без записи
+# здесь — мёртвая ветка, а запись без ветки — мёртвая запись. Тест
+# test_every_renderable_key_has_a_declared_priority требует, чтобы у каждого
+# ключа отсюда был объявленный приоритет: молчаливый уезд в хвост больше
+# невозможен.
+_RENDERABLE_CONTEXT_KEYS = frozenset(
+    {
+        "favorite_masters",
+        "preferred_time_slots",
+        "price_range_min",
+        "price_range_max",
+        "workplace_district",
+        "home_district",
+        "preferred_districts",
+        "busy_days",
+        "min_rating_preference",
+        "diet_type",
+        "prefers_flexible_cancellation",
+    }
+)
+
+# Приоритет «в самый хвост» — для ключей без объявленного порядка.
+_ORDER_UNDECLARED = len(_FIELD_ORDER)
+
+
+def _order_index(key: str) -> int:
+    """Приоритет ключа контекста по _FIELD_ORDER (хвост, если не объявлен)."""
+    field = _CONTEXT_KEY_TO_FIELD.get(key, key)
+    return _FIELD_ORDER.index(field) if field in _FIELD_ORDER else _ORDER_UNDECLARED
 
 
 def _soften(text: str, conf: float) -> str:
@@ -167,14 +211,16 @@ def build_memory_block(
         else:
             facts.append((_soften(text, c), inferred))
 
-    ordered = sorted(
-        context.keys(),
-        key=lambda k: _FIELD_ORDER.index(k) if k in _FIELD_ORDER else len(_FIELD_ORDER),
-    )
+    ordered = sorted(context.keys(), key=_order_index)
     # price склеиваем из min/max — обрабатываем один раз.
     price_done = False
 
     for field in ordered:
+        # Неизвестные ключи молча игнорируем (§2: не выдумываем). Гейт стоит
+        # ДО веток, чтобы множество известных ключей было единственным —
+        # ветка, не объявленная в нём, просто не выполнится, и это заметит тест.
+        if field not in _RENDERABLE_CONTEXT_KEYS:
+            continue
         value = context.get(field)
         if not value:  # None / "" / [] / {} / 0 / False -> нет факта (сужает None для mypy)
             continue
@@ -218,7 +264,6 @@ def build_memory_block(
             _emit("diet_type", f"Диета: {value}")
         elif field == "prefers_flexible_cancellation" and value:
             _emit("prefers_flexible_cancellation", "Предпочитает гибкую отмену")
-        # неизвестные ключи молча игнорируем (§2: не выдумываем)
 
     if not facts and not to_clarify:
         return ""

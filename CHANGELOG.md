@@ -11,6 +11,44 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The budget never reached the prompt on a full profile** (DRF-1374).
+  `_FIELD_ORDER` declared `price_range` third by importance, but that key
+  does not exist in the input dict — the context carries `price_range_min`
+  and `price_range_max`. The sort key gave both `len(_FIELD_ORDER)`, i.e.
+  the tail, so on a full green form (all twelve `users.UserPersonalContext`
+  columns) `facts[:8]` cut the budget **every time**, together with
+  `prefers_flexible_cancellation`. The `"price_range"` entry in the priority
+  table was dead code: it stated an intent the code never executed.
+
+  The failure was silent by construction — any context key absent from
+  `_FIELD_ORDER` drifts to the tail with no warning — and the existing
+  truncation tests stayed green only because they were short: with four or
+  five fields `max_facts=8` never fires. That is why the defect survived.
+
+  Fix: `_CONTEXT_KEY_TO_FIELD` maps a context key to the name of the line it
+  renders as (the budget is the only case: two keys, one line, a third
+  name), and `_order_index` resolves priority through it. `_FIELD_ORDER` is
+  now explicitly a table of **line** names.
+
+  Guard: `_RENDERABLE_CONTEXT_KEYS` is the single set of keys the renderer
+  parses, and it is load-bearing — the loop gates on it, so a render branch
+  not declared there is dead code. Two structural tests make the silent
+  class loud at CI time:
+  `test_every_renderable_key_has_a_declared_priority` fails if a renderable
+  key has no priority (the DRF-1374 shape), and
+  `test_field_order_has_no_dead_entries` fails on a priority no context key
+  can reach (the dead-`price_range` shape). Runtime behaviour for genuinely
+  foreign keys is unchanged and deliberate: they are still ignored silently,
+  because a red-zone key arriving must not crash the dialogue (§2).
+
+  Behaviour change on a full form: the two lines now dropped by
+  `max_facts=8` are `diet_type` and `prefers_flexible_cancellation` — the
+  two lowest-priority entries in the declared table. Short contexts (fewer
+  than nine facts) are unaffected; ordering below the cap is now the
+  declared one rather than dict order.
+
 ### Added
 
 - **Fact provenance in the memory block** (P0-3 / `REPORT_AYLA_MEMORY_VS_KB.md` §24,
