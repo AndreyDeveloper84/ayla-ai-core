@@ -16,7 +16,8 @@ Public API (semver-stable):
 - _safe_int / _safe_uuid — id parsers (DRF-238)
 - MasterContext / MasterCandidate — DEPRECATED aliases на SpecialistContext[int].
   Бот использует до DRF-243 миграции; после удалить.
-- build_memory_block / MEMORY_BLOCK_HEADER — memory-block (зелёная зона
+- build_memory_block / MEMORY_BLOCK_HEADER / MEMORY_INFERRED_HEADER /
+  INFERRED_MARK / SOURCE_STATED / SOURCE_INFERRED — memory-block (зелёная зона
   персональной памяти) для system_prompt concierge (W5, pilot 2026-08-15).
 
 Internal helpers (handle_*) НЕ экспортируются — caller'ы используют
@@ -46,7 +47,14 @@ from ayla_ai_core.context import (
     build_specialist_context_from_candidates,
     render_summary_text,
 )
-from ayla_ai_core.memory import MEMORY_BLOCK_HEADER, build_memory_block
+from ayla_ai_core.memory import (
+    INFERRED_MARK,
+    MEMORY_BLOCK_HEADER,
+    MEMORY_INFERRED_HEADER,
+    SOURCE_INFERRED,
+    SOURCE_STATED,
+    build_memory_block,
+)
 from ayla_ai_core.observability import (
     ReplayDeterminismError,
     TenantContextFilter,
@@ -112,10 +120,14 @@ __all__ = [
     "FORMULA_TELA_VOICE",
     "ID_T",
     # W5 (pilot 2026-08-15): green-zone memory block for the concierge system prompt
+    "INFERRED_MARK",
     "MEMORY_BLOCK_HEADER",
+    "MEMORY_INFERRED_HEADER",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
+    "SOURCE_INFERRED",
+    "SOURCE_STATED",
     "TOOL_DEFINITIONS",
     "AIConcierge",
     "ActionType",
