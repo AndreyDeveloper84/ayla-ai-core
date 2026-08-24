@@ -148,9 +148,18 @@ def build_memory_block(
     facts: list[tuple[str, bool]] = []   # утверждаемые (assert/soft)
     to_clarify: list[str] = []           # низкая уверенность -> уточнить вопросом
 
-    def _emit(field: str, text: str) -> None:
+    def _emit(field: str, text: str, *origin_fields: str) -> None:
         c = float(conf.get(field, 1.0))
-        inferred = src.get(field) == SOURCE_INFERRED
+        # `origin_fields` exists for the one line built from SEVERAL context
+        # keys: бюджет склеивается из price_range_min/max, а рендерится под
+        # именем `price_range`, которого во входном словаре нет вовсе. Без
+        # этого выведенный бюджет молча остался бы непомеченным — тихая дыра
+        # ровно того сорта, который этот параметр и закрывает.
+        # Одна строка — одно происхождение: смесь цитаты с догадкой честнее
+        # пометить догадкой.
+        inferred = any(
+            src.get(f) == SOURCE_INFERRED for f in (field, *origin_fields)
+        )
         if c < CONF_SOFT:
             # «Стоит уточнить» — это уже вопрос, а не утверждение: выдать его
             # за слова клиента нельзя, метка была бы лишним шумом.
@@ -193,7 +202,7 @@ def build_memory_block(
                 text = f"Бюджет до {_num(hi)} ₽"
             else:
                 text = f"Бюджет от {_num(lo)} ₽"
-            _emit("price_range", text)
+            _emit("price_range", text, "price_range_min", "price_range_max")
         elif field == "workplace_district":
             _emit("workplace_district", f"Ищет рядом с работой ({value})")
         elif field == "home_district":

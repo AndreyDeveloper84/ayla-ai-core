@@ -34,6 +34,11 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
   derived fact is present, plus ~3 tokens per derived line. `max_facts` still
   caps the **combined** list, so marking provenance cannot double the block.
 
+  One line is built from several context keys — the budget, glued from
+  `price_range_min`/`price_range_max` but rendered under the name
+  `price_range`, which never appears in the input dict. Its origin is read
+  from all three names, so a derived budget cannot slip through unmarked.
+
 ### Migration
 
 None. Pure additive: four new exported constants, one new keyword-only

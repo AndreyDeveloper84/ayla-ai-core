@@ -203,3 +203,19 @@ def test_max_facts_caps_the_total_not_each_group() -> None:
         max_facts=2,
     )
     assert len([ln for ln in out.splitlines() if ln.startswith("- ")]) == 2
+
+
+def test_derived_budget_is_marked_even_though_it_is_built_from_two_keys() -> None:
+    """`price_range` рендерится из price_range_min/max — источник берётся у обоих."""
+    ctx = {"price_range_min": Decimal("1000"), "price_range_max": Decimal("2500")}
+    assert INFERRED_MARK in build_memory_block(
+        ctx, sources={"price_range_min": SOURCE_INFERRED}
+    )
+    assert INFERRED_MARK in build_memory_block(
+        ctx, sources={"price_range_max": SOURCE_INFERRED}
+    )
+    # И под собственным именем строки тоже — на случай, если источник придёт так.
+    assert INFERRED_MARK in build_memory_block(ctx, sources={"price_range": SOURCE_INFERRED})
+    assert INFERRED_MARK not in build_memory_block(
+        ctx, sources={"price_range_min": SOURCE_STATED, "price_range_max": SOURCE_STATED}
+    )
