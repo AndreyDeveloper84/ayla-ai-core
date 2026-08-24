@@ -11,6 +11,40 @@ migration guide. Consumers pin by SHA (not tag — tags are force-pushable).
 
 ## [Unreleased]
 
+### Added
+
+- **Fact provenance in the memory block** (P0-3 / `REPORT_AYLA_MEMORY_VS_KB.md` §24,
+  `OD_C04_GROUNDED_WHY.md` §1). `build_memory_block` gains an optional
+  `sources: dict[str, str]` argument carrying, per field, whether a human
+  said it (`SOURCE_STATED`) or the system derived it (`SOURCE_INFERRED`).
+  Derived facts now render in their own section under
+  `MEMORY_INFERRED_HEADER` — a header that carries the *rule* («не ссылаться
+  на неё как на сказанное клиентом»), not just a label — and each such line
+  is prefixed with `INFERRED_MARK` («(вывод)») so the boundary survives
+  truncation and reordering.
+
+  Why the library needed this at all: until now the only per-field knob was
+  `confidence`, which is a **display** parameter (it picks «кажется»), not an
+  origin. A guess supplied at `confidence=1.0` reached the prompt in exactly
+  the same shape as a direct quote, and the library had no way to tell them
+  apart. `confidence` and `sources` stay orthogonal — neither is derived from
+  the other.
+
+  Token cost is bounded: one header line, emitted only when at least one
+  derived fact is present, plus ~3 tokens per derived line. `max_facts` still
+  caps the **combined** list, so marking provenance cannot double the block.
+
+### Migration
+
+None. Pure additive: four new exported constants, one new keyword-only
+argument with a `None` default. Callers that do not pass `sources` get
+**byte-identical** output — asserted by
+`tests/test_memory.py::test_without_sources_output_is_byte_identical`.
+Unknown `sources` values are ignored and render as before.
+`tests/test_public_api_surface.py::EXPECTED_PUBLIC_API` grows by four
+symbols (`INFERRED_MARK`, `MEMORY_INFERRED_HEADER`, `SOURCE_INFERRED`,
+`SOURCE_STATED`).
+
 ## [0.9.0] — 2026-07-18
 
 ### Added

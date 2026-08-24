@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from ayla_ai_core.memory import MEMORY_BLOCK_HEADER, build_memory_block
+from ayla_ai_core.memory import (
+    INFERRED_MARK,
+    MEMORY_BLOCK_HEADER,
+    MEMORY_INFERRED_HEADER,
+    SOURCE_INFERRED,
+    SOURCE_STATED,
+    build_memory_block,
+)
 
 
 def test_empty_context_returns_empty_string() -> None:
@@ -97,3 +104,102 @@ def test_max_facts_caps_block() -> None:
     assert len(fact_lines) == 3
     # Приоритетные поля (favorite_masters, time) сохранены.
     assert any("Любимые мастера" in ln for ln in fact_lines)
+
+
+# ---------------------------------------------------------------------------
+# Происхождение факта (P0-3) — «сказал человек» против «вывела система».
+# ---------------------------------------------------------------------------
+
+
+def test_inferred_fact_is_distinguishable_in_the_rendered_block() -> None:
+    """Выведенный факт НЕ должен выглядеть как сказанный человеком.
+
+    Это и есть проверяемая граница: не «есть поле», а «различимо в тексте,
+    который реально уходит в промпт».
+    """
+    out = build_memory_block(
+        {"diet_type": "vegan", "busy_days": ["tue"]},
+        sources={"diet_type": SOURCE_STATED, "busy_days": SOURCE_INFERRED},
+    )
+    stated_line = "- Диета: vegan"
+    inferred_line = f"- {INFERRED_MARK} Избегает: вторник"
+    assert stated_line in out
+    assert inferred_line in out
+    # Догадка живёт под заголовком-правилом, а сказанное — над ним.
+    assert MEMORY_INFERRED_HEADER in out
+    assert out.index(stated_line) < out.index(MEMORY_INFERRED_HEADER)
+    assert out.index(MEMORY_INFERRED_HEADER) < out.index(inferred_line)
+    # И ни один сказанный факт не носит метку вывода.
+    assert INFERRED_MARK not in stated_line
+
+
+def test_inferred_and_stated_are_not_the_same_string() -> None:
+    """Один и тот же факт из двух источников рендерится по-разному."""
+    stated = build_memory_block({"busy_days": ["tue"]}, sources={"busy_days": SOURCE_STATED})
+    inferred = build_memory_block({"busy_days": ["tue"]}, sources={"busy_days": SOURCE_INFERRED})
+    assert stated != inferred
+    assert INFERRED_MARK in inferred and INFERRED_MARK not in stated
+    assert MEMORY_INFERRED_HEADER in inferred and MEMORY_INFERRED_HEADER not in stated
+
+
+def test_without_sources_output_is_byte_identical() -> None:
+    """Отрицательный: уже верно помеченные факты не изменились.
+
+    Ни один существующий вызывающий (бэкенд, старый бот) не передаёт
+    ``sources`` — их блок обязан остаться прежним до байта.
+    """
+    ctx = {
+        "preferred_time_slots": ["evening"],
+        "diet_type": "vegan",
+        "busy_days": ["tue"],
+        "min_rating_preference": 4.8,
+    }
+    baseline = build_memory_block(ctx)
+    assert build_memory_block(ctx, sources=None) == baseline
+    assert build_memory_block(ctx, sources={}) == baseline
+    # stated == «как раньше», и неизвестное значение тоже не ломает рендер.
+    assert build_memory_block(ctx, sources=dict.fromkeys(ctx, SOURCE_STATED)) == baseline
+    assert build_memory_block(ctx, sources={"diet_type": "whatever"}) == baseline
+    assert INFERRED_MARK not in baseline
+
+
+def test_provenance_is_orthogonal_to_confidence() -> None:
+    """«Кто сказал» и «насколько уверены» не выводятся друг из друга."""
+    out = build_memory_block(
+        {"busy_days": ["tue"], "diet_type": "vegan"},
+        confidences={"busy_days": 1.0, "diet_type": 0.5},
+        sources={"busy_days": SOURCE_INFERRED, "diet_type": SOURCE_STATED},
+    )
+    # Уверенная догадка всё равно помечена как догадка…
+    assert f"- {INFERRED_MARK} Избегает: вторник" in out
+    # …а неуверенное утверждение человека смягчено, но НЕ помечено выводом.
+    assert "- кажется, Диета: vegan" in out
+
+
+def test_low_confidence_inferred_stays_in_clarify_without_mark() -> None:
+    """<0.4 уходит в «уточнить» — это вопрос, его нельзя выдать за слова клиента."""
+    out = build_memory_block(
+        {"busy_days": ["tue"]},
+        confidences={"busy_days": 0.2},
+        sources={"busy_days": SOURCE_INFERRED},
+    )
+    assert "Стоит уточнить" in out
+    assert INFERRED_MARK not in out
+    assert MEMORY_INFERRED_HEADER not in out
+
+
+def test_max_facts_caps_the_total_not_each_group() -> None:
+    """Пометка происхождения не должна удваивать бюджет блока."""
+    ctx = {
+        "preferred_time_slots": ["evening"],
+        "workplace_district": "Западная поляна",
+        "busy_days": ["tue"],
+        "min_rating_preference": 4.8,
+        "diet_type": "vegan",
+    }
+    out = build_memory_block(
+        ctx,
+        sources={"busy_days": SOURCE_INFERRED, "diet_type": SOURCE_INFERRED},
+        max_facts=2,
+    )
+    assert len([ln for ln in out.splitlines() if ln.startswith("- ")]) == 2
