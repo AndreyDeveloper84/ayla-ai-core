@@ -4,11 +4,15 @@ from __future__ import annotations
 from decimal import Decimal
 
 from ayla_ai_core.memory import (
+    _CONTEXT_KEY_TO_FIELD,
+    _FIELD_ORDER,
+    _RENDERABLE_CONTEXT_KEYS,
     INFERRED_MARK,
     MEMORY_BLOCK_HEADER,
     MEMORY_INFERRED_HEADER,
     SOURCE_INFERRED,
     SOURCE_STATED,
+    _order_index,
     build_memory_block,
 )
 
@@ -219,3 +223,128 @@ def test_derived_budget_is_marked_even_though_it_is_built_from_two_keys() -> Non
     assert INFERRED_MARK not in build_memory_block(
         ctx, sources={"price_range_min": SOURCE_STATED, "price_range_max": SOURCE_STATED}
     )
+
+
+# ---------------------------------------------------------------------------
+# Приоритет и усечение (DRF-1374) — полная анкета, а не короткая.
+#
+# Прежние тесты усечения были зелены ровно потому, что коротки: на трёх-четырёх
+# полях лимит max_facts=8 не срабатывает вовсе, и дефект приоритета не виден.
+# Клетка ниже — полная зелёная анкета `users.UserPersonalContext` (12 колонок),
+# то есть тот вход, который приходит от реального клиента с заполненным
+# профилем.
+# ---------------------------------------------------------------------------
+
+# Двенадцать полей зелёной анкеты. Ровно колонки Ayla `users.UserPersonalContext`.
+FULL_GREEN_FORM: dict[str, object] = {
+    "preferred_districts": ["Арбеково", "Центр"],
+    "preferred_time_slots": ["evening"],
+    "price_range_min": Decimal("1000"),
+    "price_range_max": Decimal("2500"),
+    "diet_type": "vegan",
+    "skin_sensitivities": ["никель"],  # рендерер её не знает — см. тест ниже
+    "prefers_flexible_cancellation": True,
+    "workplace_district": "Западная поляна",
+    "home_district": "Терновка",
+    "favorite_masters": ["m-1"],
+    "min_rating_preference": 4.8,
+    "busy_days": ["mon", "tue"],
+}
+
+
+def _fact_lines(block: str) -> list[str]:
+    return [ln for ln in block.splitlines() if ln.startswith("- ")]
+
+
+def test_full_green_form_keeps_the_budget() -> None:
+    """Бюджет обязан пережить усечение на ПОЛНОЙ анкете.
+
+    До DRF-1374 ключей `price_range_min`/`price_range_max` не было
+    в `_FIELD_ORDER` (там лежала строка `price_range`, которой во входном
+    словаре не бывает), поэтому бюджет получал приоритет «неизвестный»,
+    уезжал в хвост и на полной анкете срезался `max_facts=8` ВСЕГДА.
+    """
+    out = build_memory_block(FULL_GREEN_FORM)
+    assert "Бюджет 1000–2500 ₽" in out
+
+
+def test_full_green_form_truncates_by_declared_priority() -> None:
+    """Порядок строк = объявленный `_FIELD_ORDER`, а не порядок словаря.
+
+    И срезается ровно хвост приоритетов, а не то, что случайно оказалось
+    без записи в таблице.
+    """
+    lines = _fact_lines(build_memory_block(FULL_GREEN_FORM))
+    assert lines == [
+        "- Любимые мастера: id=m-1",
+        "- Обычно выбирает время: вечер (после 18:00)",
+        "- Бюджет 1000–2500 ₽",
+        "- Ищет рядом с работой (Западная поляна)",
+        "- Ищет рядом с домом (Терновка)",
+        "- Предпочитает районы: Арбеково, Центр",
+        "- Избегает: понедельник, вторник",
+        "- Диета: vegan",
+    ]
+    # Отрезаны два последних по приоритету — и только они.
+    # Решение владельца 25.08 поменяло местами диету и минимальный рейтинг.
+    # Ожидание правится намеренно, а не подгоняется: мест восемь, строк
+    # десять, и вопрос «кто уедет» — продуктовый, а не технический. До
+    # DRF-1374 диета доезжала случайно (бюджет молча выпадал из-за мёртвой
+    # строки); починка вернула бюджет на объявленное место и вытеснила её.
+    # Владелец выбрал диету: минимальный рейтинг — фильтр поиска, а не
+    # память о человеке.
+    assert "Минимальный рейтинг" not in "\n".join(lines)
+    assert "гибкую отмену" not in "\n".join(lines)
+
+
+def test_full_green_form_renders_everything_when_budget_allows() -> None:
+    """Без лимита видны все десять строк в порядке таблицы.
+
+    Строк десять, а разбираемых ключей одиннадцать: бюджет склеен из двух.
+    """
+    lines = _fact_lines(build_memory_block(FULL_GREEN_FORM, max_facts=99))
+    assert len(lines) == len(_FIELD_ORDER) == 10
+    assert lines[-2:] == [
+        "- Минимальный рейтинг мастера: 4.8",
+        "- Предпочитает гибкую отмену",
+    ]
+
+
+def test_every_renderable_key_has_a_declared_priority() -> None:
+    """Структурный гейт: ключ без объявленного приоритета — ошибка сборки, не хвост.
+
+    Это и есть противоядие от класса дефекта DRF-1374. Механизм сортировки
+    отказывает беззвучно: любой ключ, которого нет в `_FIELD_ORDER`, молча
+    получает приоритет «в самый хвост» и на полной анкете исчезает из промпта.
+    Ронять на РАНТАЙМЕ нельзя (§2: чужой/красный ключ обязан игнорироваться,
+    а не валить диалог), поэтому громкость переносится сюда: добавил ветку
+    рендера — обязан объявить приоритет, иначе тест красный.
+    """
+    undeclared = sorted(k for k in _RENDERABLE_CONTEXT_KEYS if _order_index(k) == len(_FIELD_ORDER))
+    assert undeclared == [], (
+        f"Ключи умеют рендериться, но не имеют приоритета и молча уедут в хвост: {undeclared}. "
+        "Добавь имя строки в _FIELD_ORDER (и в _CONTEXT_KEY_TO_FIELD, если имя ключа отличается)."
+    )
+
+
+def test_field_order_has_no_dead_entries() -> None:
+    """Обратная сторона: приоритет, до которого не дотягивается ни один ключ.
+
+    Строка `price_range` жила в таблице мёртвой — она объявляла намерение,
+    которое код не исполнял, потому что такого ключа в контексте нет.
+    """
+    reachable = {_CONTEXT_KEY_TO_FIELD.get(k, k) for k in _RENDERABLE_CONTEXT_KEYS}
+    dead = [name for name in _FIELD_ORDER if name not in reachable]
+    assert dead == [], f"Приоритет объявлен, но недостижим ни одним ключом контекста: {dead}"
+
+
+def test_profile_field_the_renderer_does_not_know_is_ignored() -> None:
+    """`skin_sensitivities` есть в анкете, но рендерер её не разбирает.
+
+    Это НЕ дефект приоритета: поле не имеет ветки рендера вовсе (зона за
+    пределами зелёного surfacing), поэтому оно не должно ни попадать в блок,
+    ни занимать место в бюджете фактов.
+    """
+    out = build_memory_block(FULL_GREEN_FORM, max_facts=99)
+    assert "никель" not in out
+    assert "skin_sensitivities" not in out
