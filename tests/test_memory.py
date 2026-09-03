@@ -3,15 +3,21 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from ayla_ai_core.memory import (
     _CONTEXT_KEY_TO_FIELD,
     _FIELD_ORDER,
     _RENDERABLE_CONTEXT_KEYS,
+    DERIVED_SOURCES,
     INFERRED_MARK,
     MEMORY_BLOCK_HEADER,
     MEMORY_INFERRED_HEADER,
+    SOURCE_BEHAVIORAL,
+    SOURCE_EXPLICIT,
     SOURCE_INFERRED,
     SOURCE_STATED,
+    STATED_SOURCES,
     _order_index,
     build_memory_block,
 )
@@ -161,9 +167,13 @@ def test_without_sources_output_is_byte_identical() -> None:
     baseline = build_memory_block(ctx)
     assert build_memory_block(ctx, sources=None) == baseline
     assert build_memory_block(ctx, sources={}) == baseline
-    # stated == «как раньше», и неизвестное значение тоже не ломает рендер.
+    # Оба имени «сказал сам» — библиотечное и бэкендовое — это «как раньше».
     assert build_memory_block(ctx, sources=dict.fromkeys(ctx, SOURCE_STATED)) == baseline
-    assert build_memory_block(ctx, sources={"diet_type": "whatever"}) == baseline
+    assert build_memory_block(ctx, sources=dict.fromkeys(ctx, SOURCE_EXPLICIT)) == baseline
+    # А вот ОТСУТСТВИЕ ключа — не значение: происхождение не сообщили, рендер
+    # прежний. Именно на этом держится байт-в-байт совместимость, и это НЕ то же
+    # самое, что присланное незнакомое значение (см. тест ниже).
+    assert build_memory_block(ctx, sources={"diet_type": SOURCE_STATED}) == baseline
     assert INFERRED_MARK not in baseline
 
 
@@ -223,6 +233,129 @@ def test_derived_budget_is_marked_even_though_it_is_built_from_two_keys() -> Non
     assert INFERRED_MARK not in build_memory_block(
         ctx, sources={"price_range_min": SOURCE_STATED, "price_range_max": SOURCE_STATED}
     )
+
+
+# ---------------------------------------------------------------------------
+# Словарь происхождения — три репозитория, один перечень.
+#
+# До этих тестов выводом считалось РОВНО слово "inferred". Внутренний PATCH
+# бэкенда принимает четыре значения (explicit|behavioral|conversational|
+# transactional), ночная инференция ставит пятое ("inferred"), стирание —
+# шестое ("erased"). Значит факт с "behavioral" уезжал в блок как прямая речь
+# клиента. Ошибка несимметрична, поэтому правило перевёрнуто: цитата — только
+# объявленное «сказал сам», всё прочее — вывод.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("origin", sorted(DERIVED_SOURCES))
+def test_every_known_derived_value_is_marked_not_only_inferred(origin: str) -> None:
+    """Каждое значение словаря, кроме «сказал сам», обязано читаться выводом.
+
+    Тест по ВСЕМУ перечню, а не по одному `behavioral`: дефект был в том, что
+    правило знало ровно одно слово из шести.
+    """
+    out = build_memory_block({"busy_days": ["tue"]}, sources={"busy_days": origin})
+    assert MEMORY_INFERRED_HEADER in out, origin
+    assert f"- {INFERRED_MARK} Избегает: вторник" in out, origin
+    # И строка стоит НИЖЕ заголовка-правила, а не в списке сказанного выше него.
+    assert out.index(MEMORY_INFERRED_HEADER) < out.index("Избегает"), origin
+
+
+@pytest.mark.parametrize("origin", sorted(STATED_SOURCES))
+def test_stated_values_still_render_as_the_clients_own_words(origin: str) -> None:
+    """Положительная стража.
+
+    Без неё правило «считать выводом всё» прошло бы и на полностью сломанной
+    правке: тесты выше зелены, даже если цитат не осталось вовсе. `explicit` —
+    имя, которым помечает бэкенд, и это ровно то, что клиент сказал сам.
+    """
+    out = build_memory_block({"busy_days": ["tue"]}, sources={"busy_days": origin})
+    assert "- Избегает: вторник" in out, origin
+    assert INFERRED_MARK not in out, origin
+    assert MEMORY_INFERRED_HEADER not in out, origin
+
+
+def test_unknown_origin_value_is_read_as_derived() -> None:
+    """Незнакомое значение — вывод, а не «как раньше».
+
+    Словарь ведут три репозитория; незнакомое значение здесь означает не
+    «ничего», а «кто-то научился ставить то, о чём библиотека не знает».
+    Безопасная сторона — умолчание.
+    """
+    out = build_memory_block({"busy_days": ["tue"]}, sources={"busy_days": "чтототакое"})
+    assert f"- {INFERRED_MARK} Избегает: вторник" in out
+    assert MEMORY_INFERRED_HEADER in out
+
+
+def test_absent_key_is_not_an_unknown_value() -> None:
+    """Граница, на которой держится совместимость.
+
+    Присланное незнакомое значение = вывод. НЕ присланный ключ = происхождение
+    не сообщили, рендер прежний. Схлопни их — и бэкенд, ещё не отдающий
+    провенанс, превратит всю анкету в догадку при первом же деплое.
+    """
+    ctx = {"busy_days": ["tue"], "diet_type": "vegan"}
+    out = build_memory_block(ctx, sources={"busy_days": SOURCE_BEHAVIORAL})
+    assert f"- {INFERRED_MARK} Избегает: вторник" in out   # ключ прислан
+    assert "- Диета: vegan" in out                          # ключа нет — как раньше
+    assert f"{INFERRED_MARK} Диета" not in out
+
+
+def test_the_backend_wire_map_can_be_passed_through_as_is() -> None:
+    """Реальная форма входа: карта `data_sources` внутреннего GET.
+
+    Бэкенд отдаёт ВСЕ зелёные поля, непомеченные — со значением "explicit".
+    Нормализовать на стороне вызывающего больше не нужно: помечена ровно одна
+    строка, у которой происхождение действительно не клиентское.
+    """
+    ctx = {
+        "preferred_time_slots": ["evening"],
+        "diet_type": "vegan",
+        "busy_days": ["tue"],
+        "min_rating_preference": 4.8,
+    }
+    wire = dict.fromkeys(ctx, SOURCE_EXPLICIT) | {"busy_days": SOURCE_BEHAVIORAL}
+    out = build_memory_block(ctx, sources=wire)
+    assert f"- {INFERRED_MARK} Избегает: вторник" in out
+    assert out.count(INFERRED_MARK) == 1
+    for stated_line in ("- Диета: vegan", "- Минимальный рейтинг мастера: 4.8"):
+        assert stated_line in out
+
+
+def test_derived_budget_is_marked_for_every_derived_value_too() -> None:
+    """Склеенная из двух ключей строка подчиняется тому же перевёрнутому правилу."""
+    ctx = {"price_range_min": Decimal("1000"), "price_range_max": Decimal("2500")}
+    for origin in sorted(DERIVED_SOURCES):
+        assert INFERRED_MARK in build_memory_block(
+            ctx, sources={"price_range_min": origin}
+        ), origin
+    assert INFERRED_MARK not in build_memory_block(
+        ctx, sources={"price_range_min": SOURCE_EXPLICIT, "price_range_max": SOURCE_EXPLICIT}
+    )
+
+
+def test_the_two_sides_of_the_vocabulary_do_not_overlap() -> None:
+    """Структурная стража перечня: значение не может быть цитатой и выводом сразу."""
+    assert frozenset() == STATED_SOURCES & DERIVED_SOURCES
+    assert SOURCE_STATED in STATED_SOURCES
+    assert SOURCE_EXPLICIT in STATED_SOURCES
+    assert SOURCE_INFERRED in DERIVED_SOURCES
+
+
+def test_the_whole_declared_vocabulary_is_classified() -> None:
+    """Каждое значение, которое контур умеет ставить, имеет объявленную сторону.
+
+    Перечень бэкенда зашит здесь намеренно: если внутренний PATCH заведёт
+    пятое значение, а библиотеку не научат, тест этого НЕ поймает — правило
+    и так отнесёт новое значение к выводам. Тест ловит обратное и худшее:
+    молчаливую пропажу значения из перечня.
+    """
+    backend_patch_choices = {
+        "explicit", "behavioral", "conversational", "transactional",
+    }
+    backend_stamps_elsewhere = {"inferred", "erased"}
+    for value in backend_patch_choices | backend_stamps_elsewhere:
+        assert value in (STATED_SOURCES | DERIVED_SOURCES), value
 
 
 # ---------------------------------------------------------------------------

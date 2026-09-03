@@ -17,7 +17,7 @@ Public API (semver-stable):
 - MasterContext / MasterCandidate — DEPRECATED aliases на SpecialistContext[int].
   Бот использует до DRF-243 миграции; после удалить.
 - build_memory_block / MEMORY_BLOCK_HEADER / MEMORY_INFERRED_HEADER /
-  INFERRED_MARK / SOURCE_STATED / SOURCE_INFERRED — memory-block (зелёная зона
+  INFERRED_MARK / STATED_SOURCES / DERIVED_SOURCES / SOURCE_* — memory-block (зелёная зона
   персональной памяти) для system_prompt concierge (W5, pilot 2026-08-15).
 
 Internal helpers (handle_*) НЕ экспортируются — caller'ы используют
@@ -48,11 +48,18 @@ from ayla_ai_core.context import (
     render_summary_text,
 )
 from ayla_ai_core.memory import (
+    DERIVED_SOURCES,
     INFERRED_MARK,
     MEMORY_BLOCK_HEADER,
     MEMORY_INFERRED_HEADER,
+    SOURCE_BEHAVIORAL,
+    SOURCE_CONVERSATIONAL,
+    SOURCE_ERASED,
+    SOURCE_EXPLICIT,
     SOURCE_INFERRED,
     SOURCE_STATED,
+    SOURCE_TRANSACTIONAL,
+    STATED_SOURCES,
     build_memory_block,
 )
 from ayla_ai_core.observability import (
@@ -117,17 +124,26 @@ __all__ = [
     "DEFAULT_HISTORY_LIMIT",
     "DEFAULT_HISTORY_TOKEN_BUDGET",
     "DEFAULT_MODEL_NAME",
+    # W5 (pilot 2026-08-15): green-zone memory block for the concierge system
+    # prompt. DERIVED_SOURCES/STATED_SOURCES + SOURCE_* — общий для контура
+    # словарь происхождения факта (цитата против вывода).
+    "DERIVED_SOURCES",
     "FORMULA_TELA_VOICE",
     "ID_T",
-    # W5 (pilot 2026-08-15): green-zone memory block for the concierge system prompt
     "INFERRED_MARK",
     "MEMORY_BLOCK_HEADER",
     "MEMORY_INFERRED_HEADER",
     "SHOW_MASTERS",
     "SHOW_MY_BOOKINGS",
     "SHOW_SLOTS",
+    "SOURCE_BEHAVIORAL",
+    "SOURCE_CONVERSATIONAL",
+    "SOURCE_ERASED",
+    "SOURCE_EXPLICIT",
     "SOURCE_INFERRED",
     "SOURCE_STATED",
+    "SOURCE_TRANSACTIONAL",
+    "STATED_SOURCES",
     "TOOL_DEFINITIONS",
     "AIConcierge",
     "ActionType",
